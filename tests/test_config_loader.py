@@ -1,7 +1,9 @@
 import textwrap
 from pathlib import Path
 
-from cfgx import load
+import pytest
+
+from cfgx import Lazy, load
 
 
 def _write(path: Path, code: str):
@@ -110,134 +112,89 @@ def test_load_multiple_configs_order(tmp_path):
     assert merged == {"a": 1, "b": 3, "c": 4}
 
 
-def test_param_injection(tmp_path):
+def test_lazy_resolution_with_overrides(tmp_path):
     cfg_path = tmp_path / "cfg.py"
     _write(
         cfg_path,
         """
-        def config(steps=1000, **params):
-            return {'steps': steps}
+        from cfgx import Lazy
+        config = {
+            "trainer": {"steps": 1000},
+            "warmup_steps": Lazy(lambda cfg: int(cfg["trainer"]["steps"] * 0.1)),
+        }
         """,
     )
 
-    # Without injection we get defaults
-    cfg_default = load(cfg_path)
-    assert cfg_default == {"steps": 1000}
-
-    # With injection we override usages consistently
-    cfg_override = load(cfg_path, params={"steps": 5000})
-    assert cfg_override == {"steps": 5000}
+    cfg = load(cfg_path, overrides=["trainer.steps=5000"])
+    assert cfg["trainer"]["steps"] == 5000
+    assert cfg["warmup_steps"] == 500
 
 
-def test_child_param_injection(tmp_path):
+def test_lazy_nested_access(tmp_path):
     cfg_path = tmp_path / "cfg.py"
     _write(
         cfg_path,
         """
-        def config(steps=1000, **params):
-            return {'steps': steps}
-        """,
-    )
-    child_cfg_path = tmp_path / "child_cfg.py"
-    _write(
-        child_cfg_path,
-        f"""
-        parents = ['{cfg_path}']
-        def config(steps=5000, **params):
-            return {{}}
+        from cfgx import Lazy
+        config = {
+            "trainer": {"steps": 1000},
+            "scheduler": {
+                "warmup_steps": Lazy(lambda cfg: int(cfg["trainer"]["steps"] * 0.1))
+            },
+        }
         """,
     )
 
-    # Without injection we get defaults
-    cfg_default = load(cfg_path)
-    assert cfg_default == {"steps": 1000}
-
-    # With child injection we override usages consistently
-    cfg_override = load(child_cfg_path)
-    assert cfg_override == {"steps": 5000}
+    cfg = load(cfg_path)
+    assert cfg["scheduler"]["warmup_steps"] == 100
 
 
-def test_child_param_inheritance(tmp_path):
+def test_lazy_attribute_access(tmp_path):
     cfg_path = tmp_path / "cfg.py"
     _write(
         cfg_path,
         """
-        def config(steps=1000, **params):
-            return {'steps': steps}
+        from cfgx import Lazy
+        config = {
+            "trainer": {"stages": [{"max_steps": 1000}]},
+            "warmup_steps": Lazy(lambda c: int(c.trainer.stages[0].max_steps * 0.1)),
+        }
         """,
     )
-    child_cfg_path = tmp_path / "child_cfg.py"
+
+    cfg = load(cfg_path)
+    assert cfg["warmup_steps"] == 100
+
+
+def test_load_without_resolve_lazy(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
     _write(
-        child_cfg_path,
-        f"""
-        parents = ['{cfg_path}']
-        def config(steps, **params):
-            return {{"warmup_steps": int(steps * 0.1)}}
+        cfg_path,
+        """
+        from cfgx import Lazy
+        config = {
+            "steps": 1000,
+            "warmup_steps": Lazy(lambda cfg: int(cfg["steps"] * 0.1)),
+        }
         """,
     )
 
-    cfg_default = load(cfg_path)
-    assert cfg_default == {"steps": 1000}
-
-    # The child inherits the parent's default for steps
-    cfg_override = load(child_cfg_path)
-    assert cfg_override == {"steps": 1000, "warmup_steps": 100}
+    cfg = load(cfg_path, resolve_lazy=False)
+    assert isinstance(cfg["warmup_steps"], Lazy)
 
 
-def test_complex_child_param_inheritance(tmp_path):
-    parent_cfg_paths = [tmp_path / f"{p}.py" for p in ["1", "2", "3"]]
-    for p_path in parent_cfg_paths:
-        grandparent_cfg_paths = [
-            tmp_path / f"{p_path.stem}_{g}.py" for g in ["X", "Y", "Z"]
-        ]
-        for gp_path in grandparent_cfg_paths:
-            _write(
-                gp_path,
-                f"""
-                def config(steps{"=100" if gp_path.stem == "3_X" else ""}, warmup_steps{"=100" if gp_path.stem == "3_X" else ""}, **params):
-                    return {{"steps_{gp_path.stem}": steps}}
-                """,
-            )
-        _write(
-            p_path,
-            f"""
-            parents = {list(map(str, grandparent_cfg_paths))}
-            def config(warmup_steps, steps={int(p_path.stem) * 1000}, extra=False, **params):
-                return {{"steps_{p_path.stem}": steps, "warmup_steps_{p_path.stem}": warmup_steps, "extra_{p_path.stem}": extra}}
-            """,
-        )
-
-    base_cfg_path = tmp_path / "base.py"
+def test_lazy_cycle_raises(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
     _write(
-        base_cfg_path,
-        f"""
-        parents = {list(map(str, parent_cfg_paths))}
-        def config(steps, warmup_steps, **params):
-            return {{"steps": steps, "warmup_steps": warmup_steps, "extra": params['extra']}}
+        cfg_path,
+        """
+        from cfgx import Lazy
+        config = {
+            "a": Lazy(lambda cfg: cfg["b"]),
+            "b": Lazy(lambda cfg: cfg["a"]),
+        }
         """,
     )
 
-    cfg = load(base_cfg_path, {"extra": True})
-    assert cfg == {
-        "extra": True,
-        "steps": 3000,
-        "warmup_steps": 100,
-        "extra_1": True,
-        "steps_1": 3000,
-        "warmup_steps_1": 100,
-        "steps_1_X": 3000,
-        "steps_1_Y": 3000,
-        "steps_1_Z": 3000,
-        "extra_2": True,
-        "steps_2": 3000,
-        "warmup_steps_2": 100,
-        "steps_2_X": 3000,
-        "steps_2_Y": 3000,
-        "steps_2_Z": 3000,
-        "extra_3": True,
-        "steps_3": 3000,
-        "warmup_steps_3": 100,
-        "steps_3_X": 3000,
-        "steps_3_Y": 3000,
-        "steps_3_Z": 3000,
-    }
+    with pytest.raises(ValueError, match="Lazy cycle"):
+        load(cfg_path)

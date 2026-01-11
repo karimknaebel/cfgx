@@ -1,12 +1,11 @@
 import ast
-import inspect
 import os
 import re
 import runpy
 import subprocess
+from collections.abc import Callable, Mapping, Sequence
 from functools import reduce
 from pathlib import Path
-from typing import Callable, Sequence
 
 
 class Delete:
@@ -21,32 +20,36 @@ class Replace:
         self.value = value
 
 
-def load(path: os.PathLike | Sequence[os.PathLike], params: dict | None = None):
+class Lazy:
+    """Callable wrapper that defers computation until config resolution."""
+
+    def __init__(self, func: Callable, /):
+        self.func = func
+
+
+def load(
+    path: os.PathLike | Sequence[os.PathLike],
+    overrides: Sequence[str] | None = None,
+    resolve_lazy: bool = True,
+):
     """
-    Load config modules from one or more paths, apply params, and merge the results.
+    Load config modules from one or more paths, apply overrides, and merge the results.
 
     Parent configs (via `parents`) are resolved first, then later paths override
-    earlier ones. Callable configs receive params (defaults come from signatures);
-    plain dict configs are merged directly.
+    earlier ones. `config` must be a dictionary.
     """
 
-    paths = [path] if isinstance(path, (str, os.PathLike)) else path
-    specs = [spec for p in paths for spec in _collect_config_specs(Path(p))]
-
-    # last assignment wins. we could also deep merge, but it feels less natural here
-    params = {k: v for _, d in specs for k, v in d.items()} | (params or {})
-
-    return reduce(
-        merge,
-        (_build_config(config, params) for config in [cfg for cfg, _ in specs]),
-    )
+    paths = [path] if isinstance(path, (str, os.PathLike)) else list(path)
+    configs = [cfg for p in paths for cfg in _collect_config_specs(Path(p))]
+    cfg = reduce(merge, configs)
+    if overrides:
+        apply_overrides(cfg, overrides)
+    if resolve_lazy:
+        _resolve_lazy(cfg)
+    return cfg
 
 
-def _build_config(config: dict | Callable, params: dict):
-    return config(**params) if callable(config) else config
-
-
-def _collect_config_specs(path: os.PathLike) -> list[tuple[dict, dict]]:
+def _collect_config_specs(path: os.PathLike) -> list[dict]:
     """
     Return the flattened inheritance chain for the config at `path`. Ordered from the farthest parent first.
     """
@@ -54,7 +57,6 @@ def _collect_config_specs(path: os.PathLike) -> list[tuple[dict, dict]]:
     config_module_globs = runpy.run_path(str(path), run_name="__config__")
 
     config = config_module_globs.get("config", {})
-    params = _defaults_args(config) if callable(config) else {}
 
     parents = config_module_globs.get("parents", None)
     if isinstance(parents, str):
@@ -64,15 +66,7 @@ def _collect_config_specs(path: os.PathLike) -> list[tuple[dict, dict]]:
         parent_cfg_specs
         for parent in parents or []
         for parent_cfg_specs in _collect_config_specs(path.parent / Path(parent))
-    ] + [(config, params)]
-
-
-def _defaults_args(f: Callable) -> dict:
-    return {
-        name: param.default
-        for name, param in inspect.signature(f).parameters.items()
-        if param.default is not inspect.Parameter.empty
-    }
+    ] + [config]
 
 
 def dump(config: dict, path: os.PathLike):
@@ -135,11 +129,10 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
     Apply CLI-style override strings to a config dictionary.
 
     Supports assignment (`=`), append (`+=`), delete (`!=`), and removal from list
-    (`-=`) using dotted/indexed key paths like ``model.layers[0].units``. Returns a
-    shallow copy with overrides applied.
+    (`-=`) using dotted/indexed key paths like ``model.layers[0].units``. Mutates
+    the dictionary in place and returns it.
     """
 
-    cfg = cfg.copy()
     for override in overrides:
         if "+=" in override:
             key, value = override.split("+=", 1)
@@ -158,6 +151,141 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
             keys = parse_key_path(key)
             set_nested(cfg, keys, infer_type(value))
     return cfg
+
+
+def resolve_lazy(cfg: dict):
+    """
+    Resolve Lazy values in a config dictionary.
+
+    Lazies are evaluated against the fully merged config, and results replace the
+    Lazy nodes in place. Cycles raise an error.
+    """
+    return _resolve_lazy(cfg)
+
+
+def _resolve_lazy(cfg: dict):
+    resolver = _LazyResolver(cfg)
+    resolver.resolve_all()
+    return cfg
+
+
+def _get_path(root, path):
+    value = root
+    for key in path:
+        value = value[key]
+    return value
+
+
+def _set_path(root, path, value):
+    target = root
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+
+def _format_path(path: tuple):
+    out = []
+    for key in path:
+        if isinstance(key, int):
+            out.append(f"[{key}]")
+        else:
+            if out:
+                out.append(".")
+            out.append(str(key))
+    return "".join(out)
+
+
+class _LazyResolver:
+    def __init__(self, root):
+        self.root = root
+        self._resolving = []
+
+    def resolve_all(self):
+        self._resolve_value((), self.root)
+
+    def resolve_at(self, path):
+        if not path:
+            return self._resolve_value((), self.root)
+        value = _get_path(self.root, path)
+        resolved = self._resolve_value(path, value)
+        if resolved is not value:
+            _set_path(self.root, path, resolved)
+        return resolved
+
+    def _resolve_value(self, path, value):
+        if isinstance(value, Lazy):
+            if path in self._resolving:
+                raise ValueError(f"Lazy cycle detected at {_format_path(path)}")
+            self._resolving.append(path)
+            try:
+                value = value.func(_wrap_proxy(self, (), self.root))
+            finally:
+                self._resolving.pop()
+        if isinstance(value, dict):
+            for key in list(value.keys()):
+                child = value[key]
+                resolved_child = self._resolve_value(path + (key,), child)
+                if resolved_child is not child:
+                    value[key] = resolved_child
+        elif isinstance(value, list):
+            for index in range(len(value)):
+                child = value[index]
+                resolved_child = self._resolve_value(path + (index,), child)
+                if resolved_child is not child:
+                    value[index] = resolved_child
+        return value
+
+
+def _wrap_proxy(resolver: _LazyResolver, path: tuple, value):
+    if isinstance(value, dict):
+        return _LazyDictProxy(resolver, path)
+    if isinstance(value, list):
+        return _LazyListProxy(resolver, path)
+    return value
+
+
+class _LazyDictProxy(Mapping):
+    def __init__(self, resolver: _LazyResolver, path: tuple):
+        self._resolver = resolver
+        self._path = path
+
+    def __getitem__(self, key):
+        path = self._path + (key,)
+        value = self._resolver.resolve_at(path)
+        return _wrap_proxy(self._resolver, path, value)
+
+    def __iter__(self):
+        container = _get_path(self._resolver.root, self._path)
+        return iter(container)
+
+    def __len__(self):
+        container = _get_path(self._resolver.root, self._path)
+        return len(container)
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class _LazyListProxy(Sequence):
+    def __init__(self, resolver: _LazyResolver, path: tuple):
+        self._resolver = resolver
+        self._path = path
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        path = self._path + (index,)
+        value = self._resolver.resolve_at(path)
+        return _wrap_proxy(self._resolver, path, value)
+
+    def __len__(self):
+        container = _get_path(self._resolver.root, self._path)
+        return len(container)
 
 
 def parse_key_path(path: str):

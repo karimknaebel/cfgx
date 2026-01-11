@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/cfgx.svg)](https://pypi.org/project/cfgx/)
 
-Python-first config loader with parent chaining, parameterized templates, and CLI-style overrides.
+Python-first config loader with parent chaining, lazy computed values, and CLI-style overrides.
 
 Docs: https://kabouzeid.github.io/cfgx/
 

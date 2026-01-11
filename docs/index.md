@@ -4,15 +4,15 @@ icon: lucide/settings
 
 # cfgx
 
-Keep configuration logic in regular Python modules. Start with a single dictionary, then scale into parameterized templates, inheritance chains, and CLI-friendly overrides without learning a new DSL.
+Keep configuration logic in regular Python modules. Start with a single dictionary, then scale into lazy computed values, inheritance chains, and CLI-friendly overrides without learning a new DSL.
 
 > Everything you write stays Python: functions, conditionals, list comprehensions, imports. `cfgx` focuses on loading, layering, and mutating dictionaries so you can drop the result into any workflow.
 
 ## Highlights
 
-- Load any Python config module or callable with `load`.
+- Load any Python config module with `load`.
 - Compose configs via `parents = [...]` chains or by supplying multiple paths at once.
-- Parameterize configs with function arguments; inject runtime values with `params`.
+- Compute values lazily with `Lazy`.
 - Adjust values on the fly using `apply_overrides` and a compact CLI syntax.
 - Control merge behavior with `Delete()` and `Replace(value)`.
 - Snapshot final dictionaries back to Python with `dump`, or pretty-print them with `format`.
@@ -33,33 +33,36 @@ Keep configuration logic in regular Python modules. Start with a single dictiona
     }
     ```
 
-2. **Extend it with parents and parameters** when the project grows:
+2. **Extend it with parents and lazy values** when the project grows:
 
     ```python
     # configs/finetune.py
+    from cfgx import Lazy
+
     parents = ["base.py"]
 
-    def config(num_classes=10, max_steps=10_000, warmup_steps=1_000):
-        return {
-            "model": {
-                "head": {"out_channels": num_classes},
-            },
-            "scheduler": {
-                "type": "linear_warmup_cosine_decay",
-                "warmup_steps": warmup_steps,
-                "decay_steps": max_steps - warmup_steps,
-            },
-            "trainer": {"max_steps": max_steps},
-        }
+    config = {
+        "model": {
+            "head": {"out_channels": 10},
+        },
+        "scheduler": {
+            "type": "linear_warmup_cosine_decay",
+            "warmup_steps": 1_000,
+            "decay_steps": Lazy(
+                lambda cfg: cfg["trainer"]["max_steps"]
+                - cfg["scheduler"]["warmup_steps"]
+            ),
+        },
+        "trainer": {"max_steps": 10_000},
+    }
     ```
 
 3. **Load everything** and apply runtime tweaks:
 
     ```python
-    from cfgx import apply_overrides, load
+    from cfgx import load
 
-    cfg = load("configs/finetune.py", params={"num_classes": 5})
-    cfg = apply_overrides(cfg, ["optimizer.lr=1e-3"])
+    cfg = load("configs/finetune.py", overrides=["model.head.out_channels=5"])
     ```
 
 4. **Feed the dictionary wherever you need it**—serialize to JSON, log to disk, or hand it to any factory you already use:
@@ -75,17 +78,23 @@ Keep configuration logic in regular Python modules. Start with a single dictiona
 
 Each config file is just Python. The loader only pays attention to two attributes:
 
-- `config`: dictionary or callable returning a dictionary.
+- `config`: dictionary.
 - `parents`: string or list of strings pointing to other config files (paths resolved relative to the current file).
 
-Use a **dictionary** (`config = {...}`) when the configuration is static. Use a **callable** when you want parameters; default argument values become part of the config defaults automatically.
+Use `Lazy` when you want values derived from other parts of the merged config.
 
 ```python
-def config(batch_size: int = 64, *, device: str = "cuda"):
-    return {
-        "data": {"batch_size": batch_size},
-        "trainer": {"device": device},
-    }
+from cfgx import Lazy
+
+config = {
+    "trainer": {"max_steps": 50_000},
+    "scheduler": {
+        "warmup_steps": 1_000,
+        "decay_steps": Lazy(
+            lambda cfg: cfg["trainer"]["max_steps"] - cfg["scheduler"]["warmup_steps"]
+        ),
+    },
+}
 ```
 
 ### Multiple parents or paths
@@ -189,7 +198,7 @@ dump(cfg, Path("runs/2024-01-10/config_snapshot.py"))
 - Organize by concern: `configs/data/imagenet.py`, `configs/optim/adamw.py`, `configs/modes/eval.py`.
 - Expose helper functions alongside `config` for reusable snippets.
 - Pair with object builders only if you want to: the output is a plain dict, so you can plug it into your own factories or formats.
-- Prefer parameters over repeated overrides when you always tweak the same value.
+- Prefer `Lazy` for derived values over repeated overrides when you always compute the same thing.
 
 
 ::: cfgx
