@@ -138,7 +138,7 @@ cfg = load(
 - `path-=value` → remove a matching element from a list
 - `path!=` → delete a key or remove a list index
 
-Values are parsed with `ast.literal_eval`, so strings, numbers, booleans, lists, dictionaries, and `None` all work (as long as they do not contain whitespace). If parsing fails, the raw string is used, so quoting strings is usually not necessary.
+Values are parsed with `ast.literal_eval`, so strings, numbers, booleans, lists, dictionaries, and `None` all work. If parsing fails, the raw string is used, so most string values do not need to be quoted.
 
 ```python
 apply_overrides(
