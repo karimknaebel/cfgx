@@ -166,6 +166,23 @@ def test_lazy_attribute_access(tmp_path):
     assert cfg["warmup_steps"] == 100
 
 
+def test_lazy_expression_shorthand(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Lazy
+        config = {
+            "trainer": {"stages": [{"max_steps": 1000}]},
+            "warmup_steps": Lazy("c.trainer.stages[0].max_steps * 0.1"),
+        }
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["warmup_steps"] == 100
+
+
 def test_load_without_resolve_lazy(tmp_path):
     cfg_path = tmp_path / "cfg.py"
     _write(

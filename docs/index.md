@@ -97,6 +97,15 @@ config = {
 }
 ```
 
+`Lazy` also accepts a string expression. Use `c` as the config proxy:
+
+```python
+config = {
+    "trainer": {"max_steps": 50_000},
+    "warmup_steps": Lazy("c.trainer.max_steps * 0.1"),
+}
+```
+
 ### Multiple parents or paths
 
 Parents are loaded depth-first (left to right), so later parents override earlier ones before the child applies its updates.

@@ -23,8 +23,16 @@ class Replace:
 class Lazy:
     """Callable wrapper that defers computation until config resolution."""
 
-    def __init__(self, func: Callable, /):
-        self.func = func
+    def __init__(self, func: Callable | str, /):
+        if isinstance(func, str):
+            code = compile(func, "<lazy>", "eval")
+
+            def _from_expr(c):
+                return eval(code, {}, {"c": c})
+
+            self.func = _from_expr
+        else:
+            self.func = func
 
 
 def load(
