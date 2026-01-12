@@ -97,3 +97,8 @@ cfg = load(
 print(format(cfg))
 dump(cfg, "runs/finetune_config.py")
 ```
+
+Assignments create intermediate dicts and extend lists with `None` as needed.
+List indices follow Python semantics in overrides: negative indices are allowed
+when the list exists and are in range (otherwise `IndexError`). Deletes and list
+removals are forgiving no-ops when the path is missing or out of range.

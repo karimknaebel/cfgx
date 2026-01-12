@@ -85,6 +85,11 @@ dictionaries, and `None` all work. If parsing fails, the raw string is used, so
 most string values do not need to be quoted. You can also use `lazy:` to define
 a `Lazy` expression from the CLI (see [Lazy values](#lazy-values)).
 
+Assignments create intermediate dicts and extend lists with `None` as needed.
+List indices follow Python semantics: negative indices are allowed when the list
+already exists and are in range (otherwise `IndexError`). Deletes and list
+removals are forgiving no-ops when the path is missing or out of range.
+
 !!! example "Override syntax"
     ```python
     from cfgx import apply_overrides
