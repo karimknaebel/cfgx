@@ -160,21 +160,15 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
     """
 
     for override in overrides:
-        if "+=" in override:
-            key, value = override.split("+=", 1)
-            keys = parse_key_path(key)
+        key, op, value = _split_override(override)
+        keys = parse_key_path(key)
+        if op == "+=":
             append_to_nested(cfg, keys, infer_type(value))
-        elif "!=" in override:
-            key, _ = override.split("!=", 1)
-            keys = parse_key_path(key)
+        elif op == "!=":
             delete_nested(cfg, keys)
-        elif "-=" in override:
-            key, value = override.split("-=", 1)
-            keys = parse_key_path(key)
+        elif op == "-=":
             remove_value_from_list(cfg, keys, infer_type(value))
         else:
-            key, value = override.split("=", 1)
-            keys = parse_key_path(key)
             set_nested(cfg, keys, infer_type(value))
     return cfg
 
@@ -326,6 +320,19 @@ def parse_key_path(path: str):
         else:
             tokens.append(part)
     return tokens
+
+
+def _split_override(override: str):
+    try:
+        idx = override.index("=")
+    except ValueError as exc:
+        raise ValueError(f"Invalid override: {override}") from exc
+    op = "="
+    key_end = idx
+    if idx > 0 and override[idx - 1] in "+-!":
+        op = override[idx - 1 : idx + 1]
+        key_end = idx - 1
+    return override[:key_end], op, override[idx + 1 :]
 
 
 def set_nested(d: dict, keys, value):

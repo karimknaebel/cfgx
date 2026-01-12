@@ -119,6 +119,13 @@ def test_apply_overrides_mix_types():
     }
 
 
+def test_apply_overrides_value_with_operator_tokens():
+    cfg = {}
+    overrides = ["foo=bar+=3", "baz=qux-=1", "zip=zot!=2"]
+    updated = apply_overrides(cfg, overrides)
+    assert updated == {"foo": "bar+=3", "baz": "qux-=1", "zip": "zot!=2"}
+
+
 def test_apply_overrides_append():
     cfg = {"existing_list": ["a", "b"], "nested": {"items": []}}
     overrides = [
