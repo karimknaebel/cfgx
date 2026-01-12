@@ -221,18 +221,18 @@ class _LazyResolver:
         self._resolving = []
 
     def resolve_all(self):
-        self._resolve_value((), self.root)
+        self._resolve_value((), self.root, resolve_children=True)
 
     def resolve_at(self, path):
         if not path:
-            return self._resolve_value((), self.root)
+            return self._resolve_value((), self.root, resolve_children=False)
         value = _get_path(self.root, path)
-        resolved = self._resolve_value(path, value)
+        resolved = self._resolve_value(path, value, resolve_children=False)
         if resolved is not value:
             _set_path(self.root, path, resolved)
         return resolved
 
-    def _resolve_value(self, path, value):
+    def _resolve_value(self, path, value, *, resolve_children: bool):
         if isinstance(value, Lazy):
             if path in self._resolving:
                 raise ValueError(f"Lazy cycle detected at {_format_path(path)}")
@@ -241,16 +241,24 @@ class _LazyResolver:
                 value = value.func(_wrap_proxy(self, (), self.root))
             finally:
                 self._resolving.pop()
-        if isinstance(value, dict):
+        if resolve_children and isinstance(value, dict):
             for key in list(value.keys()):
                 child = value[key]
-                resolved_child = self._resolve_value(path + (key,), child)
+                resolved_child = self._resolve_value(
+                    path + (key,),
+                    child,
+                    resolve_children=True,
+                )
                 if resolved_child is not child:
                     value[key] = resolved_child
-        elif isinstance(value, list):
+        elif resolve_children and isinstance(value, list):
             for index in range(len(value)):
                 child = value[index]
-                resolved_child = self._resolve_value(path + (index,), child)
+                resolved_child = self._resolve_value(
+                    path + (index,),
+                    child,
+                    resolve_children=True,
+                )
                 if resolved_child is not child:
                     value[index] = resolved_child
         return value

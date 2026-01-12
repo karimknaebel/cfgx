@@ -183,6 +183,42 @@ def test_lazy_expression_shorthand(tmp_path):
     assert cfg["warmup_steps"] == 100
 
 
+def test_lazy_expression_builtins_available(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Lazy
+        config = {
+            "values": [1, 5, 3],
+            "best": Lazy("max(c['values'])"),
+        }
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["best"] == 5
+
+
+def test_lazy_same_dict_sibling_access(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Lazy
+        config = {
+            "trainer": {
+                "max_steps": 1000,
+                "log_every": Lazy("c.trainer.max_steps // 100"),
+            },
+        }
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["trainer"]["log_every"] == 10
+
+
 def test_load_without_resolve_lazy(tmp_path):
     cfg_path = tmp_path / "cfg.py"
     _write(
