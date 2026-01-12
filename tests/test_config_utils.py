@@ -150,6 +150,30 @@ def test_apply_overrides_append_non_list_raises():
         apply_overrides(cfg, ["a.b+=2"])
 
 
+def test_apply_overrides_set_negative_index():
+    cfg = {"layers": ["conv1", "conv2"]}
+    updated = apply_overrides(cfg, ["layers[-1]=conv3"])
+    assert updated == {"layers": ["conv1", "conv3"]}
+
+
+def test_apply_overrides_set_negative_index_out_of_bounds_raises():
+    cfg = {"layers": ["conv1", "conv2"]}
+    with pytest.raises(IndexError):
+        apply_overrides(cfg, ["layers[-3]=conv3"])
+
+
+def test_apply_overrides_append_negative_index():
+    cfg = {"pipelines": [["a"], ["b"]]}
+    updated = apply_overrides(cfg, ["pipelines[-1]+=c"])
+    assert updated == {"pipelines": [["a"], ["b", "c"]]}
+
+
+def test_apply_overrides_append_negative_index_out_of_bounds_raises():
+    cfg = {"pipelines": []}
+    with pytest.raises(IndexError):
+        apply_overrides(cfg, ["pipelines[-1]+=c"])
+
+
 def test_delete_dict_key():
     cfg = {"a": {"b": {"c": 123, "d": 456}}}
     overrides = ["a.b.c!="]
@@ -164,6 +188,20 @@ def test_delete_list_index():
     assert updated == {"layers": ["conv1", "conv3"]}
 
 
+def test_delete_list_negative_index():
+    cfg = {"layers": ["conv1", "conv2", "conv3"]}
+    overrides = ["layers[-1]!="]
+    updated = apply_overrides(cfg, overrides)
+    assert updated == {"layers": ["conv1", "conv2"]}
+
+
+def test_delete_missing_path_noop():
+    cfg = {"a": {"b": 1}}
+    overrides = ["a.c!=", "missing!=", "a.b.c!="]
+    updated = apply_overrides(cfg, overrides)
+    assert updated == {"a": {"b": 1}}
+
+
 def test_delete_list_value():
     cfg = {"tags": ["debug", "train", "final"]}
     overrides = ['tags-="train"']
@@ -175,6 +213,13 @@ def test_delete_list_value_non_list_raises():
     cfg = {"tags": "train"}
     with pytest.raises(ValueError, match="not a list"):
         apply_overrides(cfg, ['tags-="train"'])
+
+
+def test_remove_missing_path_noop():
+    cfg = {"lists": [["a"]]}
+    overrides = ["missing.path-='a'", "lists[1]-='a'"]
+    updated = apply_overrides(cfg, overrides)
+    assert updated == {"lists": [["a"]]}
 
 
 def test_set_special_key():

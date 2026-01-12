@@ -368,17 +368,42 @@ def append_to_nested(d: dict, keys, value):
 
 
 def delete_nested(d: dict, keys):
-    parent, last_key = _walk_to_parent(d, keys, create=False)
+    parent, last_key = _walk_to_parent_if_exists(d, keys)
+    if parent is None:
+        return
     if isinstance(last_key, int):
-        if isinstance(parent, list) and 0 <= last_key < len(parent):
-            del parent[last_key]
+        if not isinstance(parent, list):
+            return
+        index = last_key
+        if index < 0:
+            index += len(parent)
+        if 0 <= index < len(parent):
+            del parent[index]
     else:
+        if not isinstance(parent, dict):
+            return
         parent.pop(last_key, None)
 
 
 def remove_value_from_list(d: dict, keys, value):
-    parent, last_key = _walk_to_parent(d, keys, create=False)
-    target = parent[last_key]
+    parent, last_key = _walk_to_parent_if_exists(d, keys)
+    if parent is None:
+        return
+    if isinstance(last_key, int):
+        if not isinstance(parent, list):
+            return
+        index = last_key
+        if index < 0:
+            index += len(parent)
+        if index < 0 or index >= len(parent):
+            return
+        target = parent[index]
+    else:
+        if not isinstance(parent, dict):
+            return
+        if last_key not in parent:
+            return
+        target = parent[last_key]
     if not isinstance(target, list):
         raise ValueError("Target is not a list")
     if value in target:
@@ -398,6 +423,27 @@ def _walk_to_parent(d: dict, keys, *, create: bool):
                     d[key] = {} if isinstance(keys[i + 1], str) else []
         d = d[key]
     return d, keys[-1]
+
+
+def _walk_to_parent_if_exists(d: dict, keys):
+    current = d
+    for key in keys[:-1]:
+        if isinstance(key, int):
+            if not isinstance(current, list):
+                return None, None
+            index = key
+            if index < 0:
+                index += len(current)
+            if index < 0 or index >= len(current):
+                return None, None
+            current = current[index]
+        else:
+            if not isinstance(current, dict):
+                return None, None
+            if key not in current:
+                return None, None
+            current = current[key]
+    return current, keys[-1]
 
 
 def infer_type(val: str):

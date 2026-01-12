@@ -112,6 +112,42 @@ def test_load_multiple_configs_order(tmp_path):
     assert merged == {"a": 1, "b": 3, "c": 4}
 
 
+def test_load_list_matches_parent_chain(tmp_path):
+    base = tmp_path / "base.py"
+    _write(base, "config = {'x': 1}")
+
+    mid = tmp_path / "mid.py"
+    _write(
+        mid,
+        """
+        parents = ["base.py"]
+        config = {"x": 2}
+        """,
+    )
+
+    prune = tmp_path / "prune.py"
+    _write(
+        prune,
+        """
+        from cfgx import Delete
+        parents = ["base.py"]
+        config = {"x": Delete()}
+        """,
+    )
+
+    chain = tmp_path / "chain.py"
+    _write(
+        chain,
+        """
+        parents = ["mid.py", "prune.py"]
+        """,
+    )
+
+    chained = load([mid, prune])
+    assert chained == load(chain)
+    assert chained == {}
+
+
 def test_lazy_resolution_with_overrides(tmp_path):
     cfg_path = tmp_path / "cfg.py"
     _write(
