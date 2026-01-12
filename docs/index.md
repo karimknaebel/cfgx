@@ -49,8 +49,7 @@ Keep configuration logic in regular Python modules. Start with a single dictiona
             "type": "linear_warmup_cosine_decay",
             "warmup_steps": 1_000,
             "decay_steps": Lazy(
-                lambda cfg: cfg["trainer"]["max_steps"]
-                - cfg["scheduler"]["warmup_steps"]
+                lambda c: c.trainer.max_steps - c.scheduler.warmup_steps
             ),
         },
         "trainer": {"max_steps": 10_000},
@@ -81,7 +80,17 @@ Each config file is just Python. The loader only pays attention to two attribute
 - `config`: dictionary.
 - `parents`: string or list of strings pointing to other config files (paths resolved relative to the current file).
 
-Use `Lazy` when you want values derived from other parts of the merged config.
+Use `Lazy` when you want values derived from other parts of the merged config. The
+function is called with `c`, a read-only proxy for the config that exposes
+dictionaries as `Mapping`s and lists as `Sequence`s. You can use attributes
+(`c.trainer.max_steps`), string keys (`c["trainer"]["max_steps"]`), or indices
+(`c.trainer.stages[0].max_steps`). Only Lazy values placed inside nested
+dict/list structures are resolved, and they are replaced in place during
+resolution.
+
+!!! warning
+    The proxy references the original config values. Avoid side effects inside
+    Lazy functions and don't rely on any specific resolution order.
 
 ```python
 from cfgx import Lazy
@@ -91,7 +100,7 @@ config = {
     "scheduler": {
         "warmup_steps": 1_000,
         "decay_steps": Lazy(
-            lambda cfg: cfg["trainer"]["max_steps"] - cfg["scheduler"]["warmup_steps"]
+            lambda c: c.trainer.max_steps - c.scheduler.warmup_steps
         ),
     },
 }
