@@ -83,6 +83,12 @@ def dump(config: dict, path: os.PathLike, formatter: str = "auto"):
     Persist a config dictionary to a formatted Python file.
     """
 
+    config_str = _format_snapshot(config, formatter)
+    with open(path, "w") as f:
+        f.write(config_str)
+
+
+def _format_snapshot(config: dict, formatter: str = "auto") -> str:
     if formatter not in {"auto", "ruff", "pprint"}:
         raise ValueError(f"Unknown formatter: {formatter}")
 
@@ -91,10 +97,7 @@ def dump(config: dict, path: os.PathLike, formatter: str = "auto"):
         config_str = header + "config = " + pformat(config, width=88)
     else:
         config_str = _ruff_format(header + "config = " + repr(config))
-
-    with open(path, "w") as f:
-        f.write("# fmt: off\n")  # prevent auto-formatting
-        f.write(config_str + "\n")
+    return "# fmt: off\n" + config_str + "\n"
 
 
 def format(config: dict, formatter: str = "auto") -> str:
