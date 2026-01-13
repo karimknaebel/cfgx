@@ -7,6 +7,7 @@ repo_name = "kabouzeid/cfgx"
 edit_uri = "edit/main/docs/"
 nav = [
   { "Overview" = "index.md" },
+  { "CLI" = "cli.md" },
   { "API reference" = "api.md" },
 ]
 
