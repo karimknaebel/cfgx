@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from functools import reduce
 from pathlib import Path
 from pprint import pformat
+from typing import TextIO
 
 
 class Delete:
@@ -26,6 +27,7 @@ class Lazy:
     """Callable wrapper that defers computation until config resolution."""
 
     def __init__(self, func: Callable | str, /):
+        self._expr = func if isinstance(func, str) else None
         if isinstance(func, str):
             code = compile(func, "<lazy>", "eval")
 
@@ -35,6 +37,11 @@ class Lazy:
             self.func = _from_expr
         else:
             self.func = func
+
+    def __repr__(self) -> str:
+        if self._expr is not None:
+            return f"Lazy({self._expr!r})"
+        return f"Lazy({self.func!r})"
 
 
 def load(
@@ -79,40 +86,101 @@ def _collect_config_specs(path: os.PathLike) -> list[dict]:
     ] + [config]
 
 
-def dump(config: dict, path: os.PathLike, formatter: str = "auto"):
+def dump(
+    config: dict,
+    fd: TextIO,
+    *,
+    format: str | bool = False,
+    sort_keys: bool = False,
+):
     """
-    Persist a config dictionary to a formatted Python file.
+    Persist a config dictionary to a Python snapshot.
+
+    Formatting uses repr(config); the caller is responsible for ensuring it is valid
+    Python that can be reloaded with any required imports available. Otherwise
+    formatting can raise or the snapshot may fail to load.
+
+    sort_keys orders dict keys throughout nested dict/list/tuple structures,
+    including dict subclasses.
     """
 
-    config_str = _format_snapshot(config, formatter)
-    with open(path, "w") as f:
-        f.write(config_str)
+    fd.write(dumps(config, format=format, sort_keys=sort_keys))
 
 
-def _format_snapshot(config: dict, formatter: str = "auto") -> str:
-    if formatter not in {"auto", "ruff", "pprint"}:
-        raise ValueError(f"Unknown formatter: {formatter}")
+def dumps(
+    config: dict,
+    *,
+    format: str | bool = False,
+    sort_keys: bool = False,
+) -> str:
+    """
+    Return a Python snapshot string for a config dictionary.
 
-    header = "# Auto-generated config snapshot\n"
-    if formatter == "pprint" or (formatter == "auto" and not _ruff_available()):
-        config_str = header + "config = " + pformat(config, width=88)
+    Formatting uses repr(config); the caller is responsible for ensuring it is valid
+    Python that can be reloaded with any required imports available. Otherwise
+    formatting can raise or the snapshot may fail to load.
+
+    sort_keys orders dict keys throughout nested dict/list/tuple structures,
+    including dict subclasses.
+    """
+    return _format_snapshot(config, format=format, sort_keys=sort_keys)
+
+
+def _format_snapshot(
+    config: dict,
+    *,
+    format: str | bool = False,
+    sort_keys: bool = False,
+) -> str:
+    if sort_keys and format in {False, "ruff"}:
+        config = _sort_keys(config)
+    if format is False:
+        config_str = "config = " + repr(config)
+    elif format == "pprint":
+        config_str = "config = " + pformat(
+            config, width=88, sort_dicts=sort_keys
+        )
+    elif format == "ruff":
+        config_str = _ruff_format("config = " + repr(config))
     else:
-        config_str = _ruff_format(header + "config = " + repr(config))
-    return "# fmt: off\n" + config_str + "\n"
+        raise ValueError(f"Unknown format: {format}")
+    return config_str + "\n"
 
 
-def format(config: dict, formatter: str = "auto") -> str:
-    """Return a formatted string representation of the config dictionary."""
-    if formatter not in {"auto", "ruff", "pprint"}:
-        raise ValueError(f"Unknown formatter: {formatter}")
+def format(
+    config: dict,
+    *,
+    format: str | bool = False,
+    sort_keys: bool = False,
+) -> str:
+    """
+    Return a string representation based on repr(config).
 
-    if formatter == "pprint" or (formatter == "auto" and not _ruff_available()):
-        return pformat(config, width=88)
-    return _ruff_format(repr(config))
+    Formatting is best-effort; invalid repr output can raise or fail to reload.
+
+    sort_keys orders dict keys throughout nested dict/list/tuple structures,
+    including dict subclasses.
+    """
+    if format is False:
+        if sort_keys:
+            config = _sort_keys(config)
+        return repr(config)
+    if format == "pprint":
+        return pformat(config, width=88, sort_dicts=sort_keys)
+    if format == "ruff":
+        if sort_keys:
+            config = _sort_keys(config)
+        return _ruff_format(repr(config))
+    raise ValueError(f"Unknown format: {format}")
 
 
 def _ruff_format(source: str) -> str:
-    from ruff.__main__ import find_ruff_bin
+    try:
+        from ruff.__main__ import find_ruff_bin
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Ruff is not installed; install cfgx[format] to use format='ruff'."
+        ) from exc
 
     result = subprocess.run(
         [find_ruff_bin(), "format", "--isolated", "--stdin-filename=config.py", "-"],
@@ -125,12 +193,14 @@ def _ruff_format(source: str) -> str:
     return result.stdout.rstrip("\n")
 
 
-def _ruff_available() -> bool:
-    try:
-        import ruff
-    except ModuleNotFoundError:
-        return False
-    return ruff is not None
+def _sort_keys(value):
+    if isinstance(value, dict):
+        return {key: _sort_keys(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_sort_keys(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sort_keys(item) for item in value)
+    return value
 
 
 def merge(base: dict, override: dict):

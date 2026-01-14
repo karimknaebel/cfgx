@@ -193,13 +193,18 @@ Freeze the exact configuration you ran:
     from pathlib import Path
     from cfgx import dump, format
 
-    print(format(cfg))  # Ruff-formatted when available, pprint fallback otherwise
-    dump(cfg, Path("runs/2026-01-12/config_snapshot.py"))
+    print(format(cfg, format="pprint"))
+    with Path("runs/2026-01-12/config_snapshot.py").open("w") as f:
+        dump(cfg, f, format="ruff")
     ```
 
-- `format` returns a nicely formatted string—useful for logging. Use `formatter="pprint"` or `formatter="ruff"` to force a choice.
-- `dump` writes the same representation to disk with a short header and `# fmt: off`. Because the file is valid Python, you can load it again with `load`.
-  Install `ruff` or `cfgx[format]` to use the Ruff formatter.
+- `format` returns a string derived from `repr(cfg)`; formatting is opt-in (`pprint` or `ruff`).
+- `dump` writes the same representation to a file handle; `dumps` returns the snapshot string.
+- `sort_keys=True` sorts dict keys throughout nested dict/list/tuple structures, including
+  dict subclasses.
+- These are best-effort snapshots: you're responsible for `repr()` being valid Python
+  that can recreate the config. If it isn't, formatting can raise (for example, on a
+  syntax error) or `load` may fail because required imports are missing.
 
 ## Tips for structuring configs
 

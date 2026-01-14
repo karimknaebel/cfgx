@@ -4,6 +4,7 @@ from .config import (
     Replace,
     apply_overrides,
     dump,
+    dumps,
     format,
     load,
     merge,
@@ -19,5 +20,6 @@ __all__ = [
     "Replace",
     "Lazy",
     "dump",
+    "dumps",
     "format",
 ]

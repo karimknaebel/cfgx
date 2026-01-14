@@ -4,6 +4,7 @@ from cfgx.config import (
     Lazy,
     apply_overrides,
     dump,
+    dumps,
     format,
     infer_type,
     parse_key_path,
@@ -270,15 +271,19 @@ def test_format_simple_dict():
         "trainer": {"max_steps": 50_000},
     }
     formatted = format(cfg)
-    expected = """{
-    "model": {
-        "encoder": {"channels": 64},
-        "head": {"in_channels": 64, "out_channels": 10},
-    },
-    "optimizer": {"type": "adam", "lr": 0.0003},
-    "trainer": {"max_steps": 50000},
-}"""
-    assert formatted == expected
+    assert formatted == repr(cfg)
+
+
+def test_format_pprint():
+    cfg = {"b": 2, "a": 1}
+    formatted = format(cfg, format="pprint")
+    assert formatted == "{'b': 2, 'a': 1}"
+
+
+def test_format_sort_keys():
+    cfg = {"b": 2, "a": 1}
+    formatted = format(cfg, sort_keys=True)
+    assert formatted == "{'a': 1, 'b': 2}"
 
 
 def test_dump_simple_dict(tmp_path):
@@ -290,18 +295,16 @@ def test_dump_simple_dict(tmp_path):
         "optimizer": {"type": "adam", "lr": 3e-4},
         "trainer": {"max_steps": 50_000},
     }
-    dump(cfg, tmp_path / "config_snapshot.py")
-    with open(tmp_path / "config_snapshot.py", "r") as f:
+    snapshot_path = tmp_path / "config_snapshot.py"
+    with open(snapshot_path, "w") as f:
+        dump(cfg, f)
+    with open(snapshot_path, "r") as f:
         content = f.read()
-    expected = """# fmt: off
-# Auto-generated config snapshot
-config = {
-    "model": {
-        "encoder": {"channels": 64},
-        "head": {"in_channels": 64, "out_channels": 10},
-    },
-    "optimizer": {"type": "adam", "lr": 0.0003},
-    "trainer": {"max_steps": 50000},
-}
-"""
+    expected = "config = " + repr(cfg) + "\n"
     assert content == expected
+
+
+def test_dumps_simple_dict():
+    cfg = {"a": 1}
+    expected = "config = " + repr(cfg) + "\n"
+    assert dumps(cfg) == expected
