@@ -169,6 +169,10 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
         if op == "+=":
             append_to_nested(cfg, keys, infer_type(value))
         elif op == "!=":
+            if value:
+                raise ValueError(
+                    f"Delete overrides must not include a value: {override}"
+                )
             delete_nested(cfg, keys)
         elif op == "-=":
             remove_value_from_list(cfg, keys, infer_type(value))

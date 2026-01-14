@@ -181,6 +181,12 @@ def test_delete_dict_key():
     assert updated == {"a": {"b": {"d": 456}}}
 
 
+def test_delete_with_value_raises():
+    cfg = {"a": {"b": 1}}
+    with pytest.raises(ValueError, match="Delete overrides must not include a value"):
+        apply_overrides(cfg, ["a.b!=2"])
+
+
 def test_delete_list_index():
     cfg = {"layers": ["conv1", "conv2", "conv3"]}
     overrides = ["layers[1]!="]
