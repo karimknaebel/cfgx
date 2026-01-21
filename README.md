@@ -4,7 +4,7 @@
 
 Python-first config loader with parent chaining, lazy computed values, and CLI-style overrides.
 
-Docs: https://kabouzeid.github.io/cfgx/
+Docs: https://karimknaebel.github.io/cfgx/
 
 ## Install
 
@@ -30,7 +30,7 @@ from cfgx import load
 cfg = load("configs/model.py", overrides=["optimizer.lr=1e-3"])
 ```
 
-Works well with [`specbuild`](https://github.com/kabouzeid/specbuild) when you want to build your model and other classes from config dictionaries.
+Works well with [`specbuild`](https://github.com/karimknaebel/specbuild) when you want to build your model and other classes from config dictionaries.
 
 ## Advanced example
 
