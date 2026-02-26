@@ -36,7 +36,8 @@ cfgx dump configs/finetune.py -o trainer.max_steps=12000 > runs/finetune_config.
 ## Options
 
 - `-o, --overrides`: One or more override strings, e.g. `key=value`. You can pass
-  multiple values after a single flag or repeat the flag.
+  multiple values after a single flag or repeat the flag. Values also support
+  `lazy:<expr>` and `update:<expr>` shorthands.
 - `--format {pretty,ruff,raw}`: Formatter to apply (default: `pretty`).
 - `--sort-keys`: Sort dict keys throughout nested dict/list structures (including
   dict subclasses) before formatting (dump only; default: false).

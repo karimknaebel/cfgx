@@ -4,6 +4,7 @@ import pytest
 
 from cfgx.config import (
     Lazy,
+    Update,
     apply_overrides,
     dump,
     dumps,
@@ -12,6 +13,7 @@ from cfgx.config import (
     parse_key_path,
     resolve_lazy,
     set_nested,
+    update_nested,
 )
 
 ### --- parse_key_path tests --- ###
@@ -59,11 +61,22 @@ def test_infer_type_lazy():
     assert isinstance(value, Lazy)
 
 
+def test_infer_type_update():
+    value = infer_type("update:v * 0.1")
+    assert isinstance(value, Update)
+
+
 def test_infer_type_lazy_expression_resolves():
     cfg = {"trainer": {"max_steps": 1000}}
     apply_overrides(cfg, ["warmup_steps=lazy:c.trainer.max_steps * 0.1"])
     resolve_lazy(cfg)
     assert cfg["warmup_steps"] == 100
+
+
+def test_infer_type_update_expression_resolves():
+    cfg = {"trainer": {"max_steps": 1000}}
+    apply_overrides(cfg, ["trainer.max_steps=update:v * 0.1"])
+    assert cfg["trainer"]["max_steps"] == 100.0
 
 
 ### --- resolve_lazy tests --- ###
@@ -191,6 +204,30 @@ def test_apply_overrides_append_negative_index_out_of_bounds_raises():
     cfg = {"pipelines": []}
     with pytest.raises(IndexError):
         apply_overrides(cfg, ["pipelines[-1]+=c"])
+
+
+def test_update_nested_missing_without_default_raises():
+    cfg = {}
+    with pytest.raises(TypeError):
+        update_nested(cfg, ["a"], Update(lambda v: v + 1))
+
+
+def test_apply_overrides_update_missing_string_raises():
+    cfg = {}
+    with pytest.raises(TypeError):
+        apply_overrides(cfg, ["a=update:v + [1]"])
+
+
+def test_update_nested_missing_with_default():
+    cfg = {}
+    update_nested(cfg, ["items"], Update(lambda v=[]: v + ["x"]))
+    assert cfg["items"] == ["x"]
+
+
+def test_update_nested_returning_update_is_unchecked():
+    cfg = {"a": 1}
+    update_nested(cfg, ["a"], Update(lambda v: Update(lambda w: w + 1)))
+    assert isinstance(cfg["a"], Update)
 
 
 def test_delete_dict_key():

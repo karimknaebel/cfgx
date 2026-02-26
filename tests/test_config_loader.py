@@ -304,3 +304,172 @@ def test_lazy_cycle_raises(tmp_path):
 
     with pytest.raises(ValueError, match="Lazy cycle"):
         load(cfg_path)
+
+
+def test_update_applies_left_to_right_across_parents(tmp_path):
+    base = tmp_path / "base.py"
+    _write(base, "config = {'x': 1}")
+
+    mid = tmp_path / "mid.py"
+    _write(
+        mid,
+        """
+        from cfgx import Update
+        parents = ["base.py"]
+        config = {"x": Update(lambda v: v + 1)}
+        """,
+    )
+
+    child = tmp_path / "child.py"
+    _write(
+        child,
+        """
+        from cfgx import Update
+        parents = ["mid.py"]
+        config = {"x": Update(lambda v: v * 10)}
+        """,
+    )
+
+    cfg = load(child)
+    assert cfg["x"] == 20
+
+
+def test_update_missing_callable_without_default_raises(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Update
+        config = {"x": Update(lambda v: v + 1)}
+        """,
+    )
+
+    with pytest.raises(TypeError):
+        load(cfg_path)
+
+
+def test_update_missing_callable_with_default_works(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Update
+        config = {"x": Update(lambda v=3: v + 1)}
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["x"] == 4
+
+
+def test_update_string_expression_over_existing_value(tmp_path):
+    base = tmp_path / "base.py"
+    _write(base, "config = {'x': 10}")
+
+    child = tmp_path / "child.py"
+    _write(
+        child,
+        """
+        from cfgx import Update
+        parents = ["base.py"]
+        config = {"x": Update("v * 0.1")}
+        """,
+    )
+
+    cfg = load(child)
+    assert cfg["x"] == 1.0
+
+
+def test_update_string_expression_missing_value_raises(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Update
+        config = {"x": Update("v * 0.1")}
+        """,
+    )
+
+    with pytest.raises(TypeError):
+        load(cfg_path)
+
+
+def test_update_over_lazy_prev_resolves_composed_value(tmp_path):
+    base = tmp_path / "base.py"
+    _write(
+        base,
+        """
+        from cfgx import Lazy
+        config = {"foo": 10, "a": Lazy("c.foo")}
+        """,
+    )
+
+    child = tmp_path / "child.py"
+    _write(
+        child,
+        """
+        from cfgx import Update
+        parents = ["base.py"]
+        config = {"a": Update(lambda v: v + 1)}
+        """,
+    )
+
+    cfg = load(child)
+    assert cfg["a"] == 11
+
+
+def test_update_over_lazy_prev_tracks_later_dependency_overrides(tmp_path):
+    base = tmp_path / "base.py"
+    _write(
+        base,
+        """
+        from cfgx import Lazy
+        config = {"foo": 10, "a": Lazy("c.foo")}
+        """,
+    )
+
+    mid = tmp_path / "mid.py"
+    _write(
+        mid,
+        """
+        from cfgx import Update
+        parents = ["base.py"]
+        config = {"a": Update(lambda v: v + 1)}
+        """,
+    )
+
+    child = tmp_path / "child.py"
+    _write(
+        child,
+        """
+        parents = ["mid.py"]
+        config = {"foo": 20}
+        """,
+    )
+
+    cfg = load(child)
+    assert cfg["a"] == 21
+
+
+def test_update_over_lazy_prev_returning_lazy_resolves(tmp_path):
+    base = tmp_path / "base.py"
+    _write(
+        base,
+        """
+        from cfgx import Lazy
+        config = {"foo": 3, "bar": 7, "a": Lazy("c.foo")}
+        """,
+    )
+
+    child = tmp_path / "child.py"
+    _write(
+        child,
+        """
+        from cfgx import Lazy, Update
+        parents = ["base.py"]
+        config = {"a": Update(lambda v: Lazy(lambda c: c.bar + v))}
+        """,
+    )
+
+    cfg = load(child)
+    assert cfg["a"] == 10

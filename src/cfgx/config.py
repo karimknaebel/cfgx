@@ -23,6 +23,27 @@ class Replace:
         self.value = value
 
 
+class Update:
+    """Sentinel that transforms an existing value during merge."""
+
+    def __init__(self, func: Callable | str, /):
+        self._expr = func if isinstance(func, str) else None
+        if isinstance(func, str):
+            code = compile(func, "<update>", "eval")
+
+            def _from_expr(v):
+                return eval(code, {}, {"v": v, "math": math})
+
+            self.func = _from_expr
+        else:
+            self.func = func
+
+    def __repr__(self) -> str:
+        if self._expr is not None:
+            return f"Update({self._expr!r})"
+        return f"Update({self.func!r})"
+
+
 class Lazy:
     """Callable wrapper that defers computation until config resolution."""
 
@@ -50,7 +71,7 @@ def load(
     resolve_lazy: bool = True,
 ):
     """
-    Load config modules from one or more paths, apply overrides, and merge the results.
+    Load config modules from a path or sequence of paths, apply overrides, and merge the results.
 
     Parent configs (via `parents`) are resolved first, then later paths override
     earlier ones. `config` must be a dictionary.
@@ -58,7 +79,7 @@ def load(
 
     paths = [path] if isinstance(path, (str, os.PathLike)) else list(path)
     configs = [cfg for p in paths for cfg in _collect_config_specs(Path(p))]
-    cfg = reduce(merge, configs)
+    cfg = reduce(merge, configs, {})
     if overrides:
         apply_overrides(cfg, overrides)
     if resolve_lazy:
@@ -206,11 +227,12 @@ def _sort_keys(value):
 
 def merge(base: dict, override: dict):
     """
-    Recursively merge two dictionaries, honoring Delete/Replace sentinels.
+    Recursively merge two dictionaries, honoring Delete/Replace/Update sentinels.
 
     If both sides contain dicts, merge continues down the tree. Delete removes a key
-    from the base config, Replace overwrites without further deep merging, and other
-    values simply override. Returns a new dictionary without mutating the inputs.
+    from the base config, Replace overwrites without further deep merging, Update
+    transforms the previous value, and other values simply override. Returns a new
+    dictionary without mutating the inputs.
     """
     base = base.copy()
     for k, v in override.items():
@@ -220,6 +242,11 @@ def merge(base: dict, override: dict):
             base.pop(k, None)
         elif isinstance(v, Replace):
             base[k] = v.value
+        elif isinstance(v, Update):
+            if k in base:
+                base[k] = _apply_update(base[k], v)
+            else:
+                base[k] = _apply_missing_update(v)
         else:
             base[k] = v
     return base
@@ -248,7 +275,11 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
         elif op == "-=":
             remove_value_from_list(cfg, keys, infer_type(value))
         else:
-            set_nested(cfg, keys, infer_type(value))
+            parsed_value = infer_type(value)
+            if isinstance(parsed_value, Update):
+                update_nested(cfg, keys, parsed_value)
+            else:
+                set_nested(cfg, keys, parsed_value)
     return cfg
 
 
@@ -427,6 +458,17 @@ def set_nested(d: dict, keys, value):
     _assign_item(parent, last_key, value)
 
 
+def update_nested(d: dict, keys, updater: Update):
+    parent, last_key = _walk_to_parent(d, keys, create=True)
+    try:
+        current_value = parent[last_key]
+    except (KeyError, IndexError):
+        next_value = _apply_missing_update(updater)
+    else:
+        next_value = _apply_update(current_value, updater)
+    _assign_item(parent, last_key, next_value)
+
+
 def append_to_nested(d: dict, keys, value):
     parent, last_key = _walk_to_parent(d, keys, create=True)
     try:
@@ -476,6 +518,22 @@ def _assign_item(container, key, value):
     container[key] = value
 
 
+def _apply_update(value, updater: Update):
+    if isinstance(value, Lazy):
+        def _lifted(c):
+            updated = updater.func(value.func(c))
+            if isinstance(updated, Lazy):
+                return updated.func(c)
+            return updated
+
+        return Lazy(_lifted)
+    return updater.func(value)
+
+
+def _apply_missing_update(updater: Update):
+    return updater.func()
+
+
 def _walk_to_parent(d: dict, keys, *, create: bool):
     current = d
     for i, key in enumerate(keys[:-1]):
@@ -503,6 +561,8 @@ def _walk_to_parent_if_exists(d: dict, keys):
 def infer_type(val: str):
     if val.startswith("lazy:"):
         return Lazy(val[len("lazy:") :])
+    if val.startswith("update:"):
+        return Update(val[len("update:") :])
     try:
         return ast.literal_eval(val)
     except (ValueError, SyntaxError):

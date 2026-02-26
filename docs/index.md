@@ -13,6 +13,7 @@ Keep configuration logic in regular Python modules. Start with a single dictiona
 - Load any Python config module with `load`.
 - Compose configs via `parents = [...]` chains or by supplying multiple paths at once.
 - Compute values lazily with `Lazy`.
+- Update values from previous layers with `Update`.
 - Adjust values on the fly using `apply_overrides` and a compact CLI syntax.
 - Control merge behavior with `Delete()` and `Replace(value)`.
 - Snapshot final dictionaries back to Python with `dump`, or pretty-print them with `format`.
@@ -83,7 +84,8 @@ dictionary in place. Each string uses a compact syntax designed for CLI usage.
 Values are parsed with `ast.literal_eval`, so strings, numbers, booleans, lists,
 dictionaries, and `None` all work. If parsing fails, the raw string is used, so
 most string values do not need to be quoted. You can also use `lazy:` to define
-a `Lazy` expression from the CLI (see [Lazy values](#lazy-values)).
+a `Lazy` expression and `update:` to define an `Update` expression from the CLI
+(see [Lazy values](#lazy-values) and [Update values](#update-values)).
 
 Assignments create intermediate dicts and extend lists with `None` as needed.
 List indices follow Python semantics: negative indices are allowed when the list
@@ -103,6 +105,7 @@ removals are forgiving no-ops when the path is missing or out of range.
             "trainer.hooks-='checkpoint'",
             "data.pipeline[0]!=",
             "trainer.warmup_steps=lazy:c.trainer.max_steps * 0.1",
+            "trainer.max_steps=update:v + 1000",
         ],
     )
     ```
@@ -115,6 +118,7 @@ with the base using:
 - Dicts merge recursively.
 - `Delete()` removes the key entirely.
 - `Replace(value)` uses `value` as-is without deeper merging.
+- `Update(fn_or_expr)` transforms the previous value at that path.
 - Otherwise the override value replaces the base.
 
 !!! example "Delete and Replace"
@@ -143,6 +147,38 @@ with the base using:
 
 `merge` is exported in case you want to reuse the algorithm, but `load` already
 relies on it internally.
+
+## Update values
+
+Use `Update` when a child layer should transform the previous value at the same
+path.
+
+`Update` applies during merge:
+
+- If the previous value is concrete, the update runs immediately.
+- If the previous value is `Lazy`, cfgx composes a new `Lazy` and the update runs
+  when that lazy resolves.
+
+`Update` can be defined from a callable (`lambda v: ...`) or a string
+expression (`"v + [1]"`). String expressions get `v` and `math`.
+
+!!! example "Update from the previous value"
+    ```python
+    from cfgx import Update
+
+    parents = ["base.py"]
+    config = {
+        "trainer": {
+            "hooks": Update(lambda v: [*v, "wandb"]),
+            "max_steps": Update("v + 1_000"),
+        },
+    }
+    ```
+
+!!! note
+    For missing keys, callable updates are invoked with no argument, so a
+    callable default like `lambda v=[]: v + ["x"]` works. String updates
+    require an existing value.
 
 ## Lazy values
 
@@ -211,3 +247,4 @@ Freeze the exact configuration you ran:
 - Organize by concern: `configs/base.py`, `configs/data/imagenet.py`, `configs/model/resnet.py`.
 - Expose helper functions alongside `config` for reusable snippets.
 - Prefer `Lazy` for repeated derived values, e.g. a single base learning rate that feeds multiple param groups (`backbone_lr = base_lr * 0.1`).
+- Prefer `Update` when changing an inherited value at the same key, especially for lists and incremental numeric adjustments.
