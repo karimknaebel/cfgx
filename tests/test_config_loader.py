@@ -473,3 +473,63 @@ def test_update_over_lazy_prev_returning_lazy_resolves(tmp_path):
 
     cfg = load(child)
     assert cfg["a"] == 10
+
+
+def test_update_nested_missing_value_in_new_branch_works(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Update
+        config = {"x": {"y": Update(lambda v=1: v)}}
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["x"]["y"] == 1
+
+
+def test_delete_nested_in_new_branch_does_not_leak_sentinel(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Delete
+        config = {"x": {"y": Delete(), "z": 1}}
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["x"] == {"z": 1}
+
+
+def test_replace_nested_in_new_branch_unwraps_value(tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    _write(
+        cfg_path,
+        """
+        from cfgx import Replace
+        config = {"x": {"y": Replace(1)}}
+        """,
+    )
+
+    cfg = load(cfg_path)
+    assert cfg["x"]["y"] == 1
+
+
+def test_nested_update_under_dict_override_replacing_scalar_branch(tmp_path):
+    base = tmp_path / "base.py"
+    _write(base, "config = {'x': 1}")
+
+    child = tmp_path / "child.py"
+    _write(
+        child,
+        """
+        from cfgx import Update
+        parents = ["base.py"]
+        config = {"x": {"y": Update(lambda v=2: v * 2)}}
+        """,
+    )
+
+    cfg = load(child)
+    assert cfg["x"] == {"y": 4}

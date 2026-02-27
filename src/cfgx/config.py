@@ -236,8 +236,11 @@ def merge(base: dict, override: dict):
     """
     base = base.copy()
     for k, v in override.items():
-        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
-            base[k] = merge(base[k], v)
+        if isinstance(v, dict):
+            if k in base and isinstance(base[k], dict):
+                base[k] = merge(base[k], v)
+            else:
+                base[k] = merge({}, v)
         elif isinstance(v, Delete):
             base.pop(k, None)
         elif isinstance(v, Replace):
