@@ -1,7 +1,7 @@
 [project]
 site_name = "cfgx"
 site_description = "Documentation for cfgx. Python-first config loader with composable configs and CLI overrides."
-site_author = "Karim Abou Zeid"
+site_author = "Karim Knaebel"
 repo_url = "https://github.com/karimknaebel/cfgx"
 repo_name = "karimknaebel/cfgx"
 edit_uri = "edit/main/docs/"

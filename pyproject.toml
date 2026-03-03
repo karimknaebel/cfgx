@@ -4,7 +4,7 @@ version = "0.5.1"
 description = "Python-first config loader with composition and CLI overrides."
 readme = "README.md"
 authors = [
-    { name = "Karim Abou Zeid", email = "contact@ka.codes" }
+    { name = "Karim Knaebel", email = "contact@knaebel.dev" }
 ]
 requires-python = ">=3.10"
 dependencies = [
