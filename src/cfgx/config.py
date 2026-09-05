@@ -17,14 +17,20 @@ class Delete:
 
 
 class Replace:
-    """Sentinel that forces a value to replace a mapping during merge."""
+    """Replace a value without recursively merging it with the previous value."""
 
     def __init__(self, value, /):
         self.value = value
 
 
 class Update:
-    """Sentinel that transforms an existing value during merge."""
+    """
+    Transform the previous value during merge or an override.
+
+    Accepts a callable or an expression using `v` for the previous value.
+    If the value is missing, the callable is invoked with no argument.
+    If the value is Lazy, the update runs when it resolves.
+    """
 
     def __init__(self, func: Callable | str, /):
         self._expr = func if isinstance(func, str) else None
@@ -45,7 +51,12 @@ class Update:
 
 
 class Lazy:
-    """Callable wrapper that defers computation until config resolution."""
+    """
+    Compute a value from the final config when lazies are resolved.
+
+    Accepts a callable or an expression using `c` to access the config.
+    Dictionaries and lists are exposed through read-only proxies.
+    """
 
     def __init__(self, func: Callable | str, /):
         self._expr = func if isinstance(func, str) else None
@@ -85,9 +96,9 @@ def load(
     Options are keyword-only. Overrides apply after merging, then Lazy values
     resolve against the result unless `resolve_lazy=False`.
 
-    Treat mutable source objects as consumed: they may be modified, and reusing
-    them need not produce independent results. Values are not deep-copied.
-    Source files are not rewritten. See resolve_lazy for container proxy behavior.
+    Mutable source values may be shared with the result and modified during
+    loading. Values are not deep-copied; use fresh values for independent loads.
+    Source files are not rewritten.
     """
 
     cfg = reduce(merge, _collect_config_specs(sources, Path.cwd()), {})
@@ -240,15 +251,17 @@ def merge(base: dict, override: dict):
 
     If both sides contain dicts, merge continues down the tree. Delete removes a key
     from the base config, Replace overwrites without further deep merging, Update
-    transforms the previous value, and other values simply override. Returns a new
-    dictionary, but values may be shared with the inputs. Values are not
-    deep-copied, and Update callbacks receive the previous value directly.
+    transforms the previous value, and other values simply override.
+
+    Returns a new plain dictionary. Recursively merged branches are copied,
+    but other values may be shared with the inputs. Values are not deep-copied,
+    and Update callbacks receive the previous value directly.
 
     Merge is not associative: merging a group of overrides separately
     can change their effect. Apply dictionaries left to right to preserve their
     operations on the accumulated config.
     """
-    base = base.copy()
+    base = dict(base)
     for k, v in override.items():
         if isinstance(v, dict):
             if k in base and isinstance(base[k], dict):
@@ -274,8 +287,9 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
     Apply CLI-style override strings to a config dictionary.
 
     Supports assignment (`=`), append (`+=`), delete (`!=`), and removal from list
-    (`-=`) using dotted/indexed key paths like ``model.layers[0].units``. Mutates
-    the dictionary in place and returns it.
+    (`-=`) using dotted/indexed key paths like ``model.layers[0].units``.
+    Mutates the config in place and returns it. Changes also affect any shared
+    containers targeted by the overrides.
     """
 
     for override in overrides:
@@ -304,10 +318,12 @@ def resolve_lazy(cfg: dict):
     """
     Resolve Lazy values reachable through dictionaries and lists in place.
 
-    Lazies are evaluated against the fully merged config, and results replace the
-    Lazy nodes in place. Other object types, including tuples, are not traversed.
-    Container proxies returned by Lazy expressions are not unwrapped. Cycles raise
-    an error.
+    Each Lazy is evaluated against the config and replaced with its result.
+    This also modifies shared dictionaries and lists. Other object types,
+    including tuples, are not traversed. Lazy dependency cycles raise an error.
+
+    Container proxies returned by callbacks remain live references to config
+    paths. They are not converted to ordinary dictionaries or lists.
     """
     return _resolve_lazy(cfg)
 
@@ -353,13 +369,9 @@ class _LazyResolver:
         self._resolve_value((), self.root, resolve_children=True)
 
     def resolve_at(self, path):
-        if not path:
-            return self._resolve_value((), self.root, resolve_children=False)
-        value = _get_path(self.root, path)
-        resolved = self._resolve_value(path, value, resolve_children=False)
-        if resolved is not value:
-            _set_path(self.root, path, resolved)
-        return resolved
+        return self._resolve_value(
+            path, _get_path(self.root, path), resolve_children=False
+        )
 
     def _resolve_value(self, path, value, *, resolve_children: bool):
         if isinstance(value, Lazy):
@@ -370,26 +382,22 @@ class _LazyResolver:
                 value = value.func(_wrap_proxy(self, (), self.root))
             finally:
                 self._resolving.pop()
+            # Make returned containers available to their children's dependencies.
+            _set_path(self.root, path, value)
         if resolve_children and isinstance(value, dict):
             for key in list(value.keys()):
-                child = value[key]
-                resolved_child = self._resolve_value(
+                self._resolve_value(
                     path + (key,),
-                    child,
+                    value[key],
                     resolve_children=True,
                 )
-                if resolved_child is not child:
-                    value[key] = resolved_child
         elif resolve_children and isinstance(value, list):
             for index in range(len(value)):
-                child = value[index]
-                resolved_child = self._resolve_value(
+                self._resolve_value(
                     path + (index,),
-                    child,
+                    value[index],
                     resolve_children=True,
                 )
-                if resolved_child is not child:
-                    value[index] = resolved_child
         return value
 
 
@@ -503,7 +511,6 @@ def append_to_nested(d: dict, keys, value):
     if not isinstance(target, list):
         raise ValueError("Target is not a list")
     target.append(value)
-    _assign_item(parent, last_key, target)
 
 
 def delete_nested(d: dict, keys):

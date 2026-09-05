@@ -161,7 +161,7 @@ see [Ownership and mutation](composition.md#ownership-and-mutation).
 
 Use `Update` to transform the previous value at the same path.
 
-`Update` applies during merge:
+`Update` applies during merge or through an `update:` override:
 
 - If the previous value is concrete, the update runs immediately.
 - If the previous value is `Lazy`, cfgx composes a new `Lazy` and the update runs
@@ -186,13 +186,12 @@ expression (`"v + [1]"`). String expressions get `v` and `math`.
     ```
 
 !!! note
-    For missing keys, callable updates are invoked with no argument, so a
-    callable default like `lambda v=[]: v + ["x"]` works. String updates
+    For missing keys, callable updates are invoked with no argument. A default
+    argument such as `lambda v=0: v + 1` handles this case. String updates
     require an existing value.
 
 Updates receive the previous object directly. Prefer returning a new value,
-such as `v + ["wandb"]`, over modifying it in place. This also avoids changing
-a mutable callable default that may be reused on another update.
+such as `[*v, "wandb"]`, to avoid modifying values shared with another config.
 
 ## Lazy values
 
@@ -201,9 +200,8 @@ receives `c`, a read-only proxy for the config where dicts are `Mapping`s and
 lists are `Sequence`s. You can use attribute access (`c.trainer.max_steps`),
 string keys (`c["trainer"]["max_steps"]`), and list indices
 (`c.trainer.stages[0].max_steps`). String expressions can also use `math` and
-Python builtins. Lazy values are resolved in-place after
-loading (or when you call `resolve_lazy`) and only when they appear inside
-nested dict/list structures.
+Python builtins. Lazy values are resolved in place after loading (or when you
+call `resolve_lazy`) inside nested dictionaries and lists.
 
 `resolve_lazy=True` evaluates `Lazy` expressions but does not unwrap container
 proxies they return. For example, `Lazy("c.tags")` returns a live proxy when

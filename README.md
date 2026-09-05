@@ -51,6 +51,9 @@ The same composition works directly as `load("foo.py", {"x": 3}, "bar.py")`. See
 [Config composition](docs/composition.md) for examples and the implications for
 reusing configs.
 
+Loading can modify mutable source values. For independent variants, create fresh
+values for each load; see [Reusing configs](docs/composition.md#ownership-and-mutation).
+
 ## Advanced example
 
 Base config:

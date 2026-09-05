@@ -128,64 +128,15 @@ not the original sequence of operations.
 
 ## Ownership and mutation
 
-Treat mutable source objects as consumed by `load`: do not assume they remain
-unchanged or that reusing them produces independent results. This does not mean
-every object will be modified. cfgx does not rewrite source files.
+cfgx does not deep-copy config values. The result can share lists and other
+mutable objects with its sources, so loading or modifying a config can also
+change those sources. Treat mutable inputs as consumed: reuse them only when
+you intend to share their state.
 
-Config values are ordinary Python objects. cfgx creates dictionaries while
-merging, but does not deep-copy their contents or guarantee isolation from the
-supplied configs. Lists, objects passed through `Replace`, and other mutable
-values can remain shared.
+### Reusing configs
 
-The handling of ordinary values is determined by the operation:
-
-| Value | During merging | During lazy resolution |
-| --- | --- | --- |
-| Dictionary | Recursively merge into result dictionaries. Dictionary identity is not preserved by merging. | Visit values and replace resolved entries in place. |
-| List | Replace the previous value with the supplied list, without copying it. | Visit items and replace resolved entries in place. |
-| Other Python object | Use the supplied object without copying it. | Leave it untouched; do not traverse its attributes or contents. |
-
-The dictionary and list rules include subclasses. Other mappings and sequences,
-including tuples, are not automatically traversed by lazy resolution.
-`Delete`, `Replace`, `Update`, and `Lazy` are the explicit operations described
-above. `Replace` bypasses recursive merging, but its value still participates
-in lazy resolution according to its type.
-
-`merge` copies the base dictionary at each recursive merge; entries it does not
-change can still reference existing objects. `apply_overrides` and
-`resolve_lazy` modify the supplied result in place. `load` performs those same
-operations after merging, so a new result dictionary does not imply that every
-object reachable from it is independent of the inputs.
-
-`Update` receives the previous value directly. The `Lazy` proxy provides read-only
-access to dictionaries and lists; arbitrary objects reached through it retain
-their own mutation behavior. Prefer callbacks that return values without
-modifying their inputs.
-
-Shared values can also be modified by cfgx itself: overrides mutate their
-targets, and lazy resolution replaces `Lazy` entries in dictionaries and lists.
-This can affect the source even when every callback has no side effects:
-
-```python
-from cfgx import load
-
-source = {"tags": ["base"]}
-cfg = load(source, overrides=["tags+=extra"])
-
-assert source["tags"] == ["base", "extra"]
-assert cfg["tags"] is source["tags"]
-```
-
-Likewise, resolving a `Lazy` inside a shared list replaces that entry in the
-source list. Reusing the source can therefore reuse an already-computed value.
-
-Callers decide which objects may be shared. When independent loads are needed,
-construct fresh mutable values or explicitly copy the objects whose semantics
-allow it. Loading a file recreates its dictionary and list literals, but values
-imported from other modules may still be shared across loads.
-
-For repeated runs with different overrides, fresh values can be supplied using
-an ordinary Python function:
+For independent variants, create fresh values for each load. An ordinary Python
+factory works well for a shared base:
 
 ```python
 from cfgx import Lazy, load
@@ -200,9 +151,59 @@ assert first["values"] == [40]
 assert second["values"] == [60]
 ```
 
-Passing the same already-created dictionary to both calls would reuse its
-mutable contents. A new outer dictionary alone is insufficient if it still
-contains shared lists or other mutable objects.
+Fresh inline dictionaries work the same way. Loading the same file again
+re-executes it and recreates its dictionary and list literals. Objects imported
+from other modules can still be shared; a config file can call an imported
+factory to create fresh values instead.
+
+A new outer dictionary alone is insufficient if it contains reused lists or
+other mutable objects. `base.copy()` and `merge(base, changes)` can both leave
+nested values shared. For several variants, reuse the base's file path or call
+its factory each time.
+
+You can also copy values explicitly when you know how they should be copied.
+Arbitrary Python objects may depend on their identity or not support copying,
+so cfgx leaves that choice to you.
+
+### What is copied or modified
+
+- `merge` creates a new plain dictionary for each branch it recursively merges.
+  Untouched base values remain shared. Lists, `Replace` values, and callback
+  results are used as-is.
+- `apply_overrides` modifies the supplied config in place. For example, appending
+  to a shared list changes that list for every config that uses it.
+- `resolve_lazy` replaces lazies in dictionaries and lists in place, including
+  containers returned by callbacks. Shared containers are modified too.
+- `Update` receives the previous value directly. Prefer returning new values
+  over mutating the input. Likewise, avoid side effects in `Lazy` callbacks.
+
+These rules include dict/list subclasses; recursively merged dictionaries
+become plain dicts. Other objects, including tuples and other mapping types, are
+kept as-is and are not traversed by lazy resolution. They can still be modified
+by callbacks or explicit override paths.
+
+Because merge copies dictionary branches, two keys that referred to the same
+dictionary may end up with separate dictionaries. Shared lists remain shared.
+
+### Reusing resolved values
+
+Resolving a lazy replaces it with its result. If it lives in a shared container,
+subsequent loads see the computed value:
+
+```python
+from cfgx import Lazy, load
+
+source = {"steps": 10, "values": [Lazy("c.steps * 2")]}
+first = load(source, overrides=["steps=20"])
+second = load(source, overrides=["steps=30"])
+
+assert first["values"] is second["values"] is source["values"]
+assert second["values"] == [40]
+```
+
+The list no longer contains a lazy to recompute. Use fresh source values when
+changing dependencies for another run. `resolve_lazy=False` postpones resolution
+but does not copy or isolate the config's contents.
 
 ## Repeated references are applied again
 
