@@ -1,3 +1,5 @@
+import json
+import pickle
 import sys
 from collections import UserDict, UserList
 from collections.abc import Mapping, Sequence
@@ -11,6 +13,7 @@ from cfgx import (
     Replace,
     Update,
     apply_overrides,
+    dumps,
     load,
     merge,
     resolve_lazy,
@@ -268,20 +271,51 @@ def test_arbitrary_objects_are_shared_and_callbacks_can_mutate_them():
 
 
 @pytest.mark.parametrize("reference", ["c.branch", "c.tags"])
-def test_lazy_container_references_remain_live_proxies(reference):
-    cfg = load({"branch": {"value": 1}, "tags": [1], "reference": Lazy(reference)})
-    proxy = cfg["reference"]
+@pytest.mark.parametrize("reference_first", [False, True])
+def test_lazy_container_references_preserve_identity(reference, reference_first):
+    source = {"branch": {"value": 1}, "tags": [1]}
+    if reference_first:
+        cfg = load({"reference": Lazy(reference)}, source)
+    else:
+        cfg = load(source, {"reference": Lazy(reference)})
+    alias = cfg["reference"]
+    key = "value" if reference == "c.branch" else 0
 
-    assert isinstance(proxy, Mapping if reference == "c.branch" else Sequence)
-    assert proxy is not cfg[reference[2:]]
-    with pytest.raises(TypeError):
-        proxy["value" if reference == "c.branch" else 0] = 3
+    assert alias is cfg[reference[2:]]
+    alias[key] = 3
+    assert cfg[reference[2:]][key] == 3
+    cfg[reference[2:]][key] = 4
+    assert alias[key] == 4
 
     apply_overrides(cfg, ["branch={'value': 2}", "tags=[2]"])
 
-    assert proxy["value" if reference == "c.branch" else 0] == 2
+    assert alias[key] == 4
+    assert alias is not cfg[reference[2:]]
     assert resolve_lazy(cfg) is cfg
-    assert cfg["reference"] is proxy
+    assert cfg["reference"] is alias
+    apply_overrides(cfg, ["branch!=", "tags!="])
+    assert alias[key] == 4
+
+
+@pytest.mark.parametrize("read_first", [False, True])
+def test_lazy_access_through_resolved_references_stays_read_only(read_first):
+    def read(c):
+        assert isinstance(c.reference, Mapping)
+        assert isinstance(c.reference.tags, Sequence)
+        with pytest.raises(TypeError):
+            c.reference["tags"] = []
+        with pytest.raises(TypeError):
+            c.reference.tags[0] = "changed"
+        return c.reference.tags[0]
+
+    source = {"branch": {"tags": ["base"]}, "reference": Lazy("c.branch")}
+    if read_first:
+        cfg = load({"read": Lazy(read)}, source)
+    else:
+        cfg = load(source, {"read": Lazy(read)})
+
+    assert cfg["read"] == "base"
+    assert cfg["reference"] is cfg["branch"]
 
 
 def test_update_over_lazy_reference_receives_the_proxy():
@@ -301,21 +335,134 @@ def test_update_over_lazy_reference_receives_the_proxy():
     assert cfg["tags"] == ["base"]
 
 
-def test_lazy_returned_containers_and_nested_proxies_are_not_copied():
+@pytest.mark.parametrize("references_first", [False, True])
+def test_lazy_returned_containers_and_nested_references_are_not_copied(
+    references_first,
+):
     returned = {"value": Lazy("c.steps")}
+    references = []
+
+    def make_references(c):
+        references.extend([c.branch, {"nested": [c.branch]}])
+        return references
+
+    source = {"steps": 10, "branch": Lazy(lambda c: returned)}
+    if references_first:
+        cfg = load({"references": Lazy(make_references)}, source)
+    else:
+        cfg = load(source, {"references": Lazy(make_references)})
+
+    assert cfg["branch"] is returned
+    assert cfg["references"] is references
+    assert references[0] is references[1]["nested"][0] is returned
+    assert returned == {"value": 10}
+    apply_overrides(cfg, ["branch={'value': 20}"])
+    assert references[0]["value"] == 10
+
+
+@pytest.mark.parametrize(
+    "wrap", [tuple, UserList, lambda values: UserDict(value=values[0])]
+)
+def test_lazy_returned_other_containers_are_not_unwrapped(wrap):
+    cfg = load({"tags": [1], "reference": Lazy(lambda c: wrap([c.tags]))})
+    proxy = cfg["reference"]["value" if isinstance(cfg["reference"], UserDict) else 0]
+
+    assert isinstance(proxy, Sequence)
+    assert proxy is not cfg["tags"]
+    apply_overrides(cfg, ["tags=[2]"])
+    assert proxy[0] == 2
+
+
+@pytest.mark.parametrize("expression", ["c.rows[:]", "list(c.rows)", "dict(c.branch)"])
+def test_lazy_container_copies_unwrap_nested_references(expression):
     cfg = load(
         {
+            "copy": Lazy(expression),
+            "rows": [{"tags": [Lazy("c.steps")]}],
+            "branch": {"tags": Lazy("c.rows[0].tags")},
             "steps": 10,
-            "branch": Lazy(lambda c: returned),
-            "references": Lazy(lambda c: [c.branch]),
         }
     )
 
-    assert cfg["branch"] is returned
-    assert returned == {"value": 10}
-    assert isinstance(cfg["references"][0], Mapping)
-    apply_overrides(cfg, ["branch={'value': 20}"])
-    assert cfg["references"][0]["value"] == 20
+    if isinstance(cfg["copy"], list):
+        assert cfg["copy"] is not cfg["rows"]
+        assert cfg["copy"][0] is cfg["rows"][0]
+        assert cfg["copy"] == [{"tags": [10]}]
+    else:
+        assert cfg["copy"] is not cfg["branch"]
+        assert cfg["copy"]["tags"] is cfg["branch"]["tags"]
+        assert cfg["copy"] == {"tags": [10]}
+
+
+@pytest.mark.parametrize("update", ["v", "{'nested': [v]}"])
+def test_update_over_lazy_reference_returns_underlying_container(update):
+    cfg = load(
+        {"reference": Lazy("c.tags"), "tags": [Lazy("c.steps")], "steps": 10},
+        {"reference": Update(update)},
+    )
+
+    alias = cfg["reference"] if update == "v" else cfg["reference"]["nested"][0]
+    assert alias is cfg["tags"]
+    assert alias == [10]
+
+
+def test_lazy_reference_chains_preserve_identity():
+    cfg = load(
+        {
+            "first": Lazy("c.second"),
+            "nested": Lazy("c.first.tags"),
+            "second": Lazy("c.branch"),
+            "branch": {"tags": [Lazy("c.steps")]},
+            "steps": 10,
+        }
+    )
+
+    assert cfg["first"] is cfg["second"] is cfg["branch"]
+    assert cfg["nested"] is cfg["branch"]["tags"]
+    assert cfg["nested"] == [10]
+
+
+@pytest.mark.parametrize("container_type", [dict, list])
+def test_lazy_references_to_ancestor_containers(container_type):
+    branch = (
+        {"parent": Lazy("c.branch"), "root": Lazy("c")}
+        if container_type is dict
+        else [Lazy("c.branch"), Lazy("c")]
+    )
+    cfg = load({"branch": branch, "value": Lazy("1 + 1")})
+
+    assert cfg["branch"]["parent" if container_type is dict else 0] is cfg["branch"]
+    assert cfg["branch"]["root" if container_type is dict else 1] is cfg
+    assert cfg["value"] == 2
+    assert resolve_lazy(cfg) is cfg
+
+
+def test_lazy_references_serialize_as_ordinary_containers(tmp_path):
+    cfg = load(
+        {
+            "reference": Lazy("c.branch"),
+            "nested": Lazy(lambda c: [{"tags": c.branch.tags}]),
+            "branch": {"tags": [Lazy("c.steps")]},
+            "steps": 10,
+        }
+    )
+    expected = {
+        "reference": {"tags": [10]},
+        "nested": [{"tags": [10]}],
+        "branch": {"tags": [10]},
+        "steps": 10,
+    }
+
+    assert json.loads(json.dumps(cfg)) == expected
+    restored = pickle.loads(pickle.dumps(cfg))
+    assert restored == expected
+    assert restored["reference"] is restored["branch"]
+    assert restored["nested"][0]["tags"] is restored["branch"]["tags"]
+
+    snapshot = tmp_path / "snapshot.py"
+    for format in ("raw", "pretty", "ruff"):
+        snapshot.write_text(dumps(cfg, format=format))
+        assert load(snapshot) == expected
 
 
 @pytest.mark.parametrize("read_first", [False, True])
@@ -393,6 +540,18 @@ def test_lazy_cycle_in_a_returned_container_raises():
     with pytest.raises(ValueError, match="Lazy cycle detected at branch.value"):
         resolve_lazy(cfg)
     assert isinstance(cfg["branch"], dict)
+    assert isinstance(cfg["branch"]["value"], Lazy)
+
+
+def test_lazy_cycle_through_a_container_reference_raises():
+    cfg = {
+        "reference": Lazy("c.branch"),
+        "branch": {"value": Lazy("c.reference.value")},
+    }
+
+    with pytest.raises(ValueError, match="Lazy cycle detected at reference.value"):
+        resolve_lazy(cfg)
+    assert cfg["reference"] is cfg["branch"]
     assert isinstance(cfg["branch"]["value"], Lazy)
 
 

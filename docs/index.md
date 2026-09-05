@@ -192,6 +192,9 @@ expression (`"v + [1]"`). String expressions get `v` and `math`.
 
 Updates receive the previous object directly. Prefer returning a new value,
 such as `[*v, "wandb"]`, to avoid modifying values shared with another config.
+When updating a `Lazy` container reference, the update receives the read-only
+proxy used during lazy evaluation. Any proxies in the resulting dictionaries
+and lists are unwrapped when the result is resolved.
 
 ## Lazy values
 
@@ -203,12 +206,33 @@ string keys (`c["trainer"]["max_steps"]`), and list indices
 Python builtins. Lazy values are resolved in place after loading (or when you
 call `resolve_lazy`) inside nested dictionaries and lists.
 
-`resolve_lazy=True` evaluates `Lazy` expressions but does not unwrap container
-proxies they return. For example, `Lazy("c.tags")` returns a live proxy when
-`tags` is a list, rather than the list itself. That proxy follows the referenced
-config path even if its value is later replaced. These proxies do not support
-every operation or serialization method available on ordinary dictionaries and
-lists.
+Returned container proxies become references to the underlying dictionaries
+and lists, including proxies nested in dictionaries and lists returned by a
+callback. Containers are not copied. For example, `Lazy("c.tags")` resolves to
+the same list as `tags`:
+
+```python
+from cfgx import Lazy, load
+
+cfg = load({"tags": ["base"], "reference": Lazy("c.tags")})
+assert cfg["reference"] is cfg["tags"]
+
+cfg["reference"].append("extra")
+assert cfg["tags"] == ["base", "extra"]
+
+cfg["tags"] = ["replacement"]
+assert cfg["reference"] == ["base", "extra"]
+```
+
+These are ordinary object references: mutations are shared, but replacing or
+deleting the original config key does not change the reference. The resolved
+containers support normal serialization. JSON and cfgx snapshots preserve
+values; pickle also preserves shared references. Serialization still depends
+on the contents and the format's support for cycles.
+
+As with lazy evaluation, unwrapping only traverses dictionaries and lists.
+Other objects, including tuples and custom mappings, are left as-is; proxies
+stored inside them remain proxies.
 
 !!! warning
     The proxy references the original config values. Avoid side effects inside

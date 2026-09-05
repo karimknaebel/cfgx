@@ -56,6 +56,7 @@ class Lazy:
 
     Accepts a callable or an expression using `c` to access the config.
     Dictionaries and lists are exposed through read-only proxies.
+    Returned proxies become references to the underlying containers.
     """
 
     def __init__(self, func: Callable | str, /):
@@ -322,8 +323,9 @@ def resolve_lazy(cfg: dict):
     This also modifies shared dictionaries and lists. Other object types,
     including tuples, are not traversed. Lazy dependency cycles raise an error.
 
-    Container proxies returned by callbacks remain live references to config
-    paths. They are not converted to ordinary dictionaries or lists.
+    Container proxies returned by callbacks, including those nested in dicts
+    and lists, become references to the underlying objects without copying.
+    These references share mutations but do not follow reassigned config paths.
     """
     return _resolve_lazy(cfg)
 
@@ -364,6 +366,7 @@ class _LazyResolver:
     def __init__(self, root):
         self.root = root
         self._resolving = []
+        self._resolved_containers = set()
 
     def resolve_all(self):
         self._resolve_value((), self.root, resolve_children=True)
@@ -374,28 +377,29 @@ class _LazyResolver:
         )
 
     def _resolve_value(self, path, value, *, resolve_children: bool):
-        if isinstance(value, Lazy):
+        if isinstance(value, (Lazy, _LazyDictProxy, _LazyListProxy)):
             if path in self._resolving:
                 raise ValueError(f"Lazy cycle detected at {_format_path(path)}")
             self._resolving.append(path)
             try:
-                value = value.func(_wrap_proxy(self, (), self.root))
+                if isinstance(value, Lazy):
+                    value = value.func(_wrap_proxy(self, (), self.root))
+                if isinstance(value, (_LazyDictProxy, _LazyListProxy)):
+                    value = value._resolver.resolve_at(value._path)
             finally:
                 self._resolving.pop()
             # Make returned containers available to their children's dependencies.
             _set_path(self.root, path, value)
-        if resolve_children and isinstance(value, dict):
-            for key in list(value.keys()):
+        if resolve_children and isinstance(value, (dict, list)):
+            if id(value) in self._resolved_containers:
+                return value
+            self._resolved_containers.add(id(value))
+            for key in (
+                list(value.keys()) if isinstance(value, dict) else range(len(value))
+            ):
                 self._resolve_value(
                     path + (key,),
                     value[key],
-                    resolve_children=True,
-                )
-        elif resolve_children and isinstance(value, list):
-            for index in range(len(value)):
-                self._resolve_value(
-                    path + (index,),
-                    value[index],
                     resolve_children=True,
                 )
         return value

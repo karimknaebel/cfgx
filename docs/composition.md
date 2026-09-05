@@ -173,7 +173,8 @@ so cfgx leaves that choice to you.
 - `apply_overrides` modifies the supplied config in place. For example, appending
   to a shared list changes that list for every config that uses it.
 - `resolve_lazy` replaces lazies in dictionaries and lists in place, including
-  containers returned by callbacks. Shared containers are modified too.
+  containers returned by callbacks. Returned proxies in these containers become
+  references to the underlying objects. Shared containers are modified too.
 - `Update` receives the previous value directly. Prefer returning new values
   over mutating the input. Likewise, avoid side effects in `Lazy` callbacks.
 
@@ -184,6 +185,10 @@ by callbacks or explicit override paths.
 
 Because merge copies dictionary branches, two keys that referred to the same
 dictionary may end up with separate dictionaries. Shared lists remain shared.
+References created by `Lazy` point to the resolved objects without copying, so
+`Lazy("c.branch")` shares identity with `cfg["branch"]` even when it is a
+dictionary. Mutating either reference affects the same object; reassigning one
+config key leaves the other reference pointing to the original object.
 
 ### Reusing resolved values
 
