@@ -5,8 +5,9 @@ icon: lucide/terminal
 # CLI
 
 The CLI is an optional convenience for when you want a quick render or snapshot.
-Most workflows can just call the Python API. All commands load the provided
-paths as an implicit parent chain and apply overrides in order.
+Most workflows can just call the Python API. All commands expand the provided
+config files into one sequence of dictionaries, merge them, then apply overrides
+in order. See [Config composition](composition.md).
 
 ## Commands
 

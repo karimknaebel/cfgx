@@ -3,14 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from cfgx import Lazy, load
+from cfgx import Lazy, Update, load
 
 
 def _write(path: Path, code: str):
     path.write_text(textwrap.dedent(code))
 
 
-def test_parent_precedence(tmp_path):
+def test_config_reference_precedence(tmp_path):
     """
     parent1  -> parent2  -> child
        lr=0.1    lr=0.01    batch_size=64
@@ -28,8 +28,7 @@ def test_parent_precedence(tmp_path):
     _write(
         p2,
         """
-        parents = ["parent1.py"]
-        config = {"lr": 0.01}
+        config = ["parent1.py", {"lr": 0.01}]
         """,
     )
 
@@ -37,8 +36,7 @@ def test_parent_precedence(tmp_path):
     _write(
         child,
         """
-        parents = ["parent2.py"]
-        config = {"batch_size": 64}
+        config = ["parent2.py", {"batch_size": 64}]
         """,
     )
 
@@ -63,8 +61,7 @@ def test_key_deletion(tmp_path):
         child,
         """
         from cfgx import Delete
-        parents = ["parent.py"]
-        config  = {"model": {"dropout": Delete()}}
+        config = ["parent.py", {"model": {"dropout": Delete()}}]
         """,
     )
 
@@ -89,8 +86,7 @@ def test_key_replacement(tmp_path):
         child,
         """
         from cfgx import Replace
-        parents = ["parent.py"]
-        config  = {"model": Replace({"name": "vit", "activation": "relu"})}
+        config = ["parent.py", {"model": Replace({"name": "vit", "activation": "relu"})}]
         """,
     )
 
@@ -112,7 +108,7 @@ def test_load_multiple_configs_order(tmp_path):
     assert merged == {"a": 1, "b": 3, "c": 4}
 
 
-def test_load_list_matches_parent_chain(tmp_path):
+def test_load_list_matches_config_file(tmp_path):
     base = tmp_path / "base.py"
     _write(base, "config = {'x': 1}")
 
@@ -120,8 +116,7 @@ def test_load_list_matches_parent_chain(tmp_path):
     _write(
         mid,
         """
-        parents = ["base.py"]
-        config = {"x": 2}
+        config = ["base.py", {"x": 2}]
         """,
     )
 
@@ -130,8 +125,7 @@ def test_load_list_matches_parent_chain(tmp_path):
         prune,
         """
         from cfgx import Delete
-        parents = ["base.py"]
-        config = {"x": Delete()}
+        config = ["base.py", {"x": Delete()}]
         """,
     )
 
@@ -139,13 +133,222 @@ def test_load_list_matches_parent_chain(tmp_path):
     _write(
         chain,
         """
-        parents = ["mid.py", "prune.py"]
+        config = ["mid.py", "prune.py"]
         """,
     )
 
     chained = load([mid, prune])
     assert chained == load(chain)
     assert chained == {}
+
+
+def test_config_list_mixes_files_and_dicts(tmp_path):
+    _write(tmp_path / "foo.py", 'config = {"x": 1, "options": {"a": 1}}')
+    _write(
+        tmp_path / "bar.py",
+        """
+        from cfgx import Update
+        config = {"x": Update("v * 2"), "options": {"b": 2}}
+        """,
+    )
+    _write(
+        tmp_path / "config.py",
+        """
+        from cfgx import Update
+        config = ["foo.py", {"x": 3}, "bar.py", {"x": Update("v + 1")}]
+        """,
+    )
+
+    assert load(tmp_path / "config.py") == {"x": 7, "options": {"a": 1, "b": 2}}
+
+
+def test_config_lists_expand_before_merging(tmp_path):
+    _write(
+        tmp_path / "base.py",
+        'config = {"x": 10, "debug": True, "model": {"a": 1}}',
+    )
+    _write(
+        tmp_path / "transform.py",
+        """
+        from cfgx import Delete, Replace, Update
+        config = {
+            "x": Update("v * 2"),
+            "debug": Delete(),
+            "model": Replace({"b": 2}),
+        }
+        """,
+    )
+    _write(
+        tmp_path / "group.py",
+        'config = ["transform.py", {"model": {"c": 3}}]',
+    )
+    _write(tmp_path / "config.py", 'config = ["base.py", "group.py"]')
+
+    assert load(tmp_path / "config.py") == {"x": 20, "model": {"b": 2, "c": 3}}
+    assert load(tmp_path / "config.py") == load(
+        [tmp_path / "base.py", tmp_path / "transform.py", {"model": {"c": 3}}]
+    )
+
+
+def test_config_list_paths_are_relative_to_declaring_file(tmp_path):
+    (tmp_path / "presets").mkdir()
+    _write(tmp_path / "presets" / "base.py", 'config = {"x": 5}')
+    _write(
+        tmp_path / "presets" / "preset.py",
+        """
+        from pathlib import Path
+        config = [Path("base.py"), {"preset": True}]
+        """,
+    )
+    _write(
+        tmp_path / "finish.py",
+        """
+        from cfgx import Update
+        config = {"x": Update("v + 1")}
+        """,
+    )
+    _write(
+        tmp_path / "config.py",
+        """
+        from pathlib import Path
+        config = [Path("presets/preset.py"), "finish.py"]
+        """,
+    )
+
+    assert load(tmp_path / "config.py") == {"x": 6, "preset": True}
+
+
+def test_config_lists_flatten_without_expanding_dictionary_values(tmp_path):
+    _write(
+        tmp_path / "config.py",
+        """
+        config = [
+            [],
+            [{"x": 1}, [{"x": 2}]],
+            {
+                "items": ["missing.py", {"nested": [1, 2]}],
+                "parents": ["also_missing.py"],
+                "config": [{"y": 3}],
+            },
+        ]
+        """,
+    )
+
+    assert load(tmp_path / "config.py") == {
+        "x": 2,
+        "items": ["missing.py", {"nested": [1, 2]}],
+        "parents": ["also_missing.py"],
+        "config": [{"y": 3}],
+    }
+
+
+def test_config_list_repeated_references_apply_each_time(tmp_path):
+    _write(
+        tmp_path / "increment.py",
+        """
+        from cfgx import Update
+        config = {"x": Update("v + 1")}
+        """,
+    )
+    _write(
+        tmp_path / "config.py",
+        'config = [{"x": 1}, "increment.py", "increment.py"]',
+    )
+
+    assert load(tmp_path / "config.py") == {"x": 3}
+
+
+def test_shared_config_references_are_reapplied(tmp_path):
+    _write(tmp_path / "base.py", 'config = {"x": 1}')
+    _write(tmp_path / "left.py", 'config = ["base.py", {"x": 2}]')
+    _write(tmp_path / "right.py", 'config = ["base.py", {"y": 3}]')
+    _write(tmp_path / "config.py", 'config = ["left.py", "right.py"]')
+
+    assert load(tmp_path / "config.py") == {"x": 1, "y": 3}
+
+
+@pytest.mark.parametrize("declaration", ["config = {}", "config = []"])
+def test_empty_config(tmp_path, declaration):
+    _write(tmp_path / "config.py", declaration)
+
+    assert load(tmp_path / "config.py") == {}
+
+
+@pytest.mark.parametrize("declaration", ["", "configs = {'x': 1}"])
+def test_config_declaration_is_required(tmp_path, declaration):
+    _write(tmp_path / "missing.py", declaration)
+    _write(tmp_path / "config.py", 'config = ["missing.py", {"y": 2}]')
+
+    with pytest.raises(ValueError, match="must define 'config'") as error:
+        load(tmp_path / "config.py")
+    assert str(tmp_path / "missing.py") in str(error.value)
+
+
+def test_load_only_reads_config_attribute(tmp_path):
+    _write(
+        tmp_path / "config.py",
+        'parents = ["missing.py"]\nconfig = {"x": 1}',
+    )
+
+    assert load(tmp_path / "config.py") == {"x": 1}
+
+
+def test_load_variadic_sources(tmp_path):
+    _write(
+        tmp_path / "double.py",
+        """
+        from cfgx import Update
+        config = {"x": Update("v * 2")}
+        """,
+    )
+
+    assert load({"x": 3}, tmp_path / "double.py", {"y": 4}) == {
+        "x": 6,
+        "y": 4,
+    }
+    assert load([{"x": 3}, tmp_path / "double.py"], {"y": 4}) == load(
+        [{"x": 3}, tmp_path / "double.py", {"y": 4}]
+    )
+    assert load({"x": 3}, tmp_path / "double.py", overrides=["x=7"]) == {"x": 7}
+    assert load() == {}
+
+
+def test_load_accepts_inline_configs(tmp_path):
+    _write(
+        tmp_path / "increment.py",
+        """
+        from cfgx import Update
+        config = {"x": Update("v + 1")}
+        """,
+    )
+
+    assert load([{"x": 1}, tmp_path / "increment.py", {"x": Update("v * 2")}]) == {
+        "x": 4
+    }
+    assert load({"x": 1}, overrides=["x=2"]) == {"x": 2}
+    assert load([]) == {}
+
+
+def test_config_list_lazy_resolves_after_overrides(tmp_path):
+    _write(
+        tmp_path / "base.py",
+        """
+        from cfgx import Lazy
+        config = {"x": 2, "scaled": Lazy("c.x * 2")}
+        """,
+    )
+    _write(
+        tmp_path / "config.py",
+        """
+        from cfgx import Update
+        config = ["base.py", {"scaled": Update("v + 1")}, {"x": 3}]
+        """,
+    )
+
+    cfg = load(tmp_path / "config.py", resolve_lazy=False)
+    assert cfg["x"] == 3
+    assert isinstance(cfg["scaled"], Lazy)
+    assert load(tmp_path / "config.py", overrides=["x=5"]) == {"x": 5, "scaled": 11}
 
 
 def test_lazy_resolution_with_overrides(tmp_path):
@@ -306,7 +509,7 @@ def test_lazy_cycle_raises(tmp_path):
         load(cfg_path)
 
 
-def test_update_applies_left_to_right_across_parents(tmp_path):
+def test_update_applies_left_to_right_across_files(tmp_path):
     base = tmp_path / "base.py"
     _write(base, "config = {'x': 1}")
 
@@ -315,8 +518,7 @@ def test_update_applies_left_to_right_across_parents(tmp_path):
         mid,
         """
         from cfgx import Update
-        parents = ["base.py"]
-        config = {"x": Update(lambda v: v + 1)}
+        config = ["base.py", {"x": Update(lambda v: v + 1)}]
         """,
     )
 
@@ -325,8 +527,7 @@ def test_update_applies_left_to_right_across_parents(tmp_path):
         child,
         """
         from cfgx import Update
-        parents = ["mid.py"]
-        config = {"x": Update(lambda v: v * 10)}
+        config = ["mid.py", {"x": Update(lambda v: v * 10)}]
         """,
     )
 
@@ -371,8 +572,7 @@ def test_update_string_expression_over_existing_value(tmp_path):
         child,
         """
         from cfgx import Update
-        parents = ["base.py"]
-        config = {"x": Update("v * 0.1")}
+        config = ["base.py", {"x": Update("v * 0.1")}]
         """,
     )
 
@@ -409,8 +609,7 @@ def test_update_over_lazy_prev_resolves_composed_value(tmp_path):
         child,
         """
         from cfgx import Update
-        parents = ["base.py"]
-        config = {"a": Update(lambda v: v + 1)}
+        config = ["base.py", {"a": Update(lambda v: v + 1)}]
         """,
     )
 
@@ -433,8 +632,7 @@ def test_update_over_lazy_prev_tracks_later_dependency_overrides(tmp_path):
         mid,
         """
         from cfgx import Update
-        parents = ["base.py"]
-        config = {"a": Update(lambda v: v + 1)}
+        config = ["base.py", {"a": Update(lambda v: v + 1)}]
         """,
     )
 
@@ -442,8 +640,7 @@ def test_update_over_lazy_prev_tracks_later_dependency_overrides(tmp_path):
     _write(
         child,
         """
-        parents = ["mid.py"]
-        config = {"foo": 20}
+        config = ["mid.py", {"foo": 20}]
         """,
     )
 
@@ -466,8 +663,7 @@ def test_update_over_lazy_prev_returning_lazy_resolves(tmp_path):
         child,
         """
         from cfgx import Lazy, Update
-        parents = ["base.py"]
-        config = {"a": Update(lambda v: Lazy(lambda c: c.bar + v))}
+        config = ["base.py", {"a": Update(lambda v: Lazy(lambda c: c.bar + v))}]
         """,
     )
 
@@ -526,8 +722,7 @@ def test_nested_update_under_dict_override_replacing_scalar_branch(tmp_path):
         child,
         """
         from cfgx import Update
-        parents = ["base.py"]
-        config = {"x": {"y": Update(lambda v=2: v * 2)}}
+        config = ["base.py", {"x": {"y": Update(lambda v=2: v * 2)}}]
         """,
     )
 

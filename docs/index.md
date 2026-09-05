@@ -4,16 +4,16 @@ icon: lucide/settings
 
 # cfgx
 
-Keep configuration logic in regular Python modules. Start with a single dictionary, then scale into lazy computed values, inheritance chains, and CLI-friendly overrides without learning a new DSL.
+Keep configuration logic in regular Python modules. Start with a single dictionary, then compose configs in order, compute values lazily, and apply CLI-friendly overrides without learning a new DSL.
 
-> Everything you write stays Python: functions, conditionals, list comprehensions, imports. `cfgx` focuses on loading, layering, and mutating dictionaries so you can drop the result into any workflow.
+> Everything you write stays Python: functions, conditionals, list comprehensions, imports. `cfgx` focuses on loading and merging dictionaries so you can drop the result into any workflow.
 
 ## Highlights
 
 - Load any Python config module with `load`.
-- Compose configs via `parents = [...]` chains or by supplying multiple paths at once.
+- Compose configs with `config = ["base.py", {"x": 3}, "model.py"]` or pass the list directly to `load`.
 - Compute values lazily with `Lazy`.
-- Update values from previous layers with `Update`.
+- Transform previous values with `Update`.
 - Adjust values on the fly using `apply_overrides` and a compact CLI syntax.
 - Control merge behavior with `Delete()` and `Replace(value)`.
 - Snapshot final dictionaries back to Python with `dump`, or pretty-print them with `format`.
@@ -42,31 +42,39 @@ The result is a plain dictionary you can serialize, log, or feed into factories.
 
 ## Config modules
 
-Each config file is just Python. The loader only pays attention to two attributes:
+Each config file is just Python and must declare `config` as a dictionary or a
+list of dictionaries and file paths. Use `{}` or `[]` for an empty config.
 
-- `config`: dictionary.
-- `parents`: string or list of strings pointing to other config files (paths resolved relative to the current file).
-
-!!! example "Parent chaining"
+!!! example "Compose configs"
     ```python
     # configs/finetune.py
-    parents = ["base.py", "schedules/cosine.py"]
-
-    config = {"trainer": {"max_steps": 10_000}}
+    config = [
+        "base.py",
+        {"trainer": {"max_steps": 10_000}},
+        "schedules/cosine.py",
+    ]
     ```
 
-You can also compose multiple files by passing a sequence of paths to `load`.
+cfgx expands file references, concatenates config lists, then merges the
+dictionaries from left to right. Referenced paths are relative to the declaring
+file. Lists inside dictionaries remain ordinary data.
 
-!!! example "Multiple paths"
+See [Config composition](composition.md) for the full behavior, including repeated
+references and why referenced configs are not merged independently.
+
+You can also pass dictionaries and paths directly to `load`, either as separate
+arguments or in a list. These paths are relative to the working directory.
+The `overrides` and `resolve_lazy` options are keyword-only.
+
+!!! example "Compose configs directly"
     ```python
     from cfgx import load
 
     cfg = load(
-        [
-            "configs/base.py",
-            "configs/backbones/resnet.py",
-            "configs/modes/eval.py",
-        ]
+        "configs/base.py",
+        "configs/backbones/resnet.py",
+        {"trainer": {"max_steps": 10_000}},
+        "configs/modes/eval.py",
     )
     ```
 
@@ -112,7 +120,7 @@ removals are forgiving no-ops when the path is missing or out of range.
 
 ## Merge semantics
 
-When configs are layered, `cfgx` walks the override dictionary and combines it
+When configs are merged, `cfgx` walks the override dictionary and combines it
 with the base using:
 
 - Dicts merge recursively.
@@ -146,12 +154,12 @@ with the base using:
     ```
 
 `merge` is exported in case you want to reuse the algorithm, but `load` already
-relies on it internally.
+relies on it internally. The result can share mutable values with its inputs;
+see [Ownership and mutation](composition.md#ownership-and-mutation).
 
 ## Update values
 
-Use `Update` when a child layer should transform the previous value at the same
-path.
+Use `Update` to transform the previous value at the same path.
 
 `Update` applies during merge:
 
@@ -166,19 +174,25 @@ expression (`"v + [1]"`). String expressions get `v` and `math`.
     ```python
     from cfgx import Update
 
-    parents = ["base.py"]
-    config = {
-        "trainer": {
-            "hooks": Update(lambda v: [*v, "wandb"]),
-            "max_steps": Update("v + 1_000"),
+    config = [
+        "base.py",
+        {
+            "trainer": {
+                "hooks": Update(lambda v: [*v, "wandb"]),
+                "max_steps": Update("v + 1_000"),
+            },
         },
-    }
+    ]
     ```
 
 !!! note
     For missing keys, callable updates are invoked with no argument, so a
     callable default like `lambda v=[]: v + ["x"]` works. String updates
     require an existing value.
+
+Updates receive the previous object directly. Prefer returning a new value,
+such as `v + ["wandb"]`, over modifying it in place. This also avoids changing
+a mutable callable default that may be reused on another update.
 
 ## Lazy values
 
@@ -191,9 +205,19 @@ Python builtins. Lazy values are resolved in-place after
 loading (or when you call `resolve_lazy`) and only when they appear inside
 nested dict/list structures.
 
+`resolve_lazy=True` evaluates `Lazy` expressions but does not unwrap container
+proxies they return. For example, `Lazy("c.tags")` returns a live proxy when
+`tags` is a list, rather than the list itself. That proxy follows the referenced
+config path even if its value is later replaced. These proxies do not support
+every operation or serialization method available on ordinary dictionaries and
+lists.
+
 !!! warning
     The proxy references the original config values. Avoid side effects inside
-    Lazy functions and don't rely on any specific resolution order.
+    Lazy functions and don't rely on any specific resolution order. Arbitrary
+    Python objects accessed through the proxy retain their own mutation behavior.
+    See [Ownership and mutation](composition.md#ownership-and-mutation) for how
+    lazy resolution itself can affect shared containers.
 
 !!! example "Lazy with a function"
     ```python
@@ -247,4 +271,4 @@ Freeze the exact configuration you ran:
 - Organize by concern: `configs/base.py`, `configs/data/imagenet.py`, `configs/model/resnet.py`.
 - Expose helper functions alongside `config` for reusable snippets.
 - Prefer `Lazy` for repeated derived values, e.g. a single base learning rate that feeds multiple param groups (`backbone_lr = base_lr * 0.1`).
-- Prefer `Update` when changing an inherited value at the same key, especially for lists and incremental numeric adjustments.
+- Prefer `Update` when changing a previous value at the same key, especially for lists and incremental numeric adjustments.

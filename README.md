@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/cfgx.svg)](https://pypi.org/project/cfgx/)
 
-Python-first config loader with parent chaining, lazy computed values, and CLI-style overrides.
+Python-first config loader with config composition, lazy computed values, and CLI-style overrides.
 
 Docs: https://karimknaebel.github.io/cfgx/
 
@@ -31,6 +31,25 @@ cfg = load("configs/model.py", overrides=["optimizer.lr=1e-3"])
 ```
 
 Works well with [`specbuild`](https://github.com/karimknaebel/specbuild) when you want to build your model and other classes from config dictionaries.
+
+## Composition model
+
+Declare a dictionary, or a list of dictionaries and file paths:
+
+```python
+config = ["foo.py", {"x": 3}, "bar.py"]
+```
+
+cfgx expands file references, concatenates config lists, then merges the
+dictionaries from left to right. It applies overrides afterward, then resolves
+`Lazy` values. Lists inside dictionaries remain ordinary config data.
+
+`Delete`, `Replace`, and `Update` act on the accumulated result at their position
+in the sequence. Referenced configs are not merged independently, and repeated
+references are applied each time they occur. Every file must define `config`.
+The same composition works directly as `load("foo.py", {"x": 3}, "bar.py")`. See
+[Config composition](docs/composition.md) for examples and the implications for
+reusing configs.
 
 ## Advanced example
 
@@ -62,20 +81,23 @@ Derived config:
 # configs/finetune.py
 from cfgx import Delete, Lazy, Replace
 
-parents = ["base.py"]
-
-config = {
-    "model": {"depth": 12},
-    "optimizer": {
-        "weight_decay": Delete(),
-        "schedule": Replace({"type": "cosine", "t_max": 40_000}),
+config = [
+    "base.py",
+    {
+        "model": {"depth": 12},
+        "optimizer": {
+            "weight_decay": Delete(),
+            "schedule": Replace({"type": "cosine", "t_max": 40_000}),
+        },
+        "trainer": {"max_steps": 10_000},
+        "scheduler": {
+            "warmup_steps": 500,
+            "decay_steps": Lazy(
+                lambda c: c.trainer.max_steps - c.scheduler.warmup_steps
+            ),
+        },
     },
-    "trainer": {"max_steps": 10_000},
-    "scheduler": {
-        "warmup_steps": 500,
-        "decay_steps": Lazy(lambda c: c.trainer.max_steps - c.scheduler.warmup_steps),
-    },
-}
+]
 ```
 
 Load, override, and snapshot:

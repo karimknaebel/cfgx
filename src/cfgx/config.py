@@ -66,20 +66,31 @@ class Lazy:
 
 
 def load(
-    path: os.PathLike | Sequence[os.PathLike],
+    *sources: str | os.PathLike | dict | Sequence,
     overrides: Sequence[str] | None = None,
     resolve_lazy: bool = True,
 ):
     """
-    Load config modules from a path or sequence of paths, apply overrides, and merge the results.
+    Expand config files and sequences, then merge dictionaries in order.
 
-    Parent configs (via `parents`) are resolved first, then later paths override
-    earlier ones. `config` must be a dictionary.
+    Accepts file paths, dictionaries, or sequences of these. Each file's
+    `config` can likewise be a dictionary or a sequence of dictionaries and
+    file paths. Sequences expand recursively into one sequence of dictionaries,
+    which are merged left to right. Lists inside dictionaries remain data.
+
+    File references are relative to the declaring file; input paths are relative
+    to the working directory. Repeated references are expanded each time.
+    Each file must define `config`. Referenced files are not merged independently.
+
+    Options are keyword-only. Overrides apply after merging, then Lazy values
+    resolve against the result unless `resolve_lazy=False`.
+
+    Treat mutable source objects as consumed: they may be modified, and reusing
+    them need not produce independent results. Values are not deep-copied.
+    Source files are not rewritten. See resolve_lazy for container proxy behavior.
     """
 
-    paths = [path] if isinstance(path, (str, os.PathLike)) else list(path)
-    configs = [cfg for p in paths for cfg in _collect_config_specs(Path(p))]
-    cfg = reduce(merge, configs, {})
+    cfg = reduce(merge, _collect_config_specs(sources, Path.cwd()), {})
     if overrides:
         apply_overrides(cfg, overrides)
     if resolve_lazy:
@@ -87,24 +98,22 @@ def load(
     return cfg
 
 
-def _collect_config_specs(path: os.PathLike) -> list[dict]:
+def _collect_config_specs(
+    config: str | os.PathLike | dict | Sequence, base_dir: Path
+) -> list[dict]:
     """
-    Return the flattened inheritance chain for the config at `path`. Ordered from the farthest parent first.
+    Expand file references and sequences into unmerged dictionaries.
     """
-    path = Path(path).resolve()
-    config_module_globs = runpy.run_path(str(path), run_name="__config__")
+    if isinstance(config, dict):
+        return [config]
+    if isinstance(config, (str, os.PathLike)):
+        path = (base_dir / config).resolve()
+        config_module_globs = runpy.run_path(str(path), run_name="__config__")
+        if "config" not in config_module_globs:
+            raise ValueError(f"Config file {path} must define 'config'")
+        return _collect_config_specs(config_module_globs["config"], path.parent)
 
-    config = config_module_globs.get("config", {})
-
-    parents = config_module_globs.get("parents", None)
-    if isinstance(parents, str):
-        parents = [parents]
-
-    return [
-        parent_cfg_specs
-        for parent in parents or []
-        for parent_cfg_specs in _collect_config_specs(path.parent / Path(parent))
-    ] + [config]
+    return [cfg for item in config for cfg in _collect_config_specs(item, base_dir)]
 
 
 def dump(
@@ -232,7 +241,12 @@ def merge(base: dict, override: dict):
     If both sides contain dicts, merge continues down the tree. Delete removes a key
     from the base config, Replace overwrites without further deep merging, Update
     transforms the previous value, and other values simply override. Returns a new
-    dictionary without mutating the inputs.
+    dictionary, but values may be shared with the inputs. Values are not
+    deep-copied, and Update callbacks receive the previous value directly.
+
+    Merge is not associative: merging a group of overrides separately
+    can change their effect. Apply dictionaries left to right to preserve their
+    operations on the accumulated config.
     """
     base = base.copy()
     for k, v in override.items():
@@ -288,10 +302,12 @@ def apply_overrides(cfg: dict, overrides: Sequence[str]):
 
 def resolve_lazy(cfg: dict):
     """
-    Resolve Lazy values in a config dictionary.
+    Resolve Lazy values reachable through dictionaries and lists in place.
 
     Lazies are evaluated against the fully merged config, and results replace the
-    Lazy nodes in place. Cycles raise an error.
+    Lazy nodes in place. Other object types, including tuples, are not traversed.
+    Container proxies returned by Lazy expressions are not unwrapped. Cycles raise
+    an error.
     """
     return _resolve_lazy(cfg)
 
