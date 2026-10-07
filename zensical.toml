@@ -8,7 +8,9 @@ edit_uri = "edit/main/docs/"
 nav = [
   { "Overview" = "index.md" },
   { "Config composition" = "composition.md" },
+  { "Expressions" = "expressions.md" },
   { "CLI" = "cli.md" },
+  { "Resolution contract" = "design.md" },
   { "API reference" = "api.md" },
 ]
 

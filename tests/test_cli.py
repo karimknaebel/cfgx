@@ -1,5 +1,5 @@
 from cfgx.cli import main
-from cfgx.config import dumps, format as format_config, load
+from cfgx import dumps, format as format_config, load
 
 
 def test_render_basic(capsys, tmp_path):
@@ -38,15 +38,11 @@ def test_dump_basic(capsys, tmp_path):
     assert out == dumps(load(cfg_path))
 
 
-def test_render_no_resolve_lazy(capsys, tmp_path):
+def test_render_computed_override(capsys, tmp_path):
     cfg_path = tmp_path / "cfg.py"
-    cfg_path.write_text("from cfgx import Lazy\nconfig = {'a': Lazy('1 + 1')}\n")
-
-    exit_code = main(["render", str(cfg_path), "--no-resolve-lazy"])
-
-    out = capsys.readouterr().out
-    assert exit_code == 0
-    assert "Lazy(" in out
+    cfg_path.write_text("from cfgx import final\nconfig = {'a': 2, 'b': final.a * 2}\n")
+    assert main(["render", str(cfg_path), "-o", "a=expr:value * 3"]) == 0
+    assert capsys.readouterr().out == "{'a': 6, 'b': 12}\n"
 
 
 def test_render_raw(capsys, tmp_path):

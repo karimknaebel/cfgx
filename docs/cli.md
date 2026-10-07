@@ -1,45 +1,66 @@
----
-icon: lucide/terminal
----
+# CLI and overrides
 
-# CLI
+## Load and render
 
-The CLI is an optional convenience for when you want a quick render or snapshot.
-Most workflows can just call the Python API. All commands expand the provided
-config files into one sequence of dictionaries, merge them, then apply overrides
-in order. See [Config composition](composition.md).
-
-## Commands
-
-### `cfgx render` / `cfgx print`
-
-Pretty-print the config dictionary to stdout. Use `--format raw` to print the
-raw `repr(config)` output.
-
-```bash
-cfgx render configs/base.py configs/finetune.py -o trainer.max_steps=12000 trainer.hooks+=wandb
+```sh
+cfgx render base.py finetune.py -o 'steps=48000' 'lr=expr:value * 0.1'
+cfgx dump base.py --format pretty --sort-keys > snapshot.py
 ```
 
-### `cfgx dump` / `cfgx freeze`
+`print` is an alias for `render`; `freeze` is an alias for `dump`. Both commands
+resolve the complete config. `--format` accepts `pretty`, `raw`, or `ruff`.
+`dump` emits a Python `config = ...` assignment, while `render` prints the value.
 
-Print a Python snapshot (`config = ...`) to stdout.
-By default, the snapshot uses `pretty` formatting; use `--format raw` for raw
-`repr(config)` output.
-This is a best-effort snapshot based on `repr(config)`; you are responsible for
-ensuring it is valid Python that can recreate the config. Otherwise formatting
-can raise (for example, on a syntax error) or the output may fail to load
-because required imports are missing.
+The same overrides work through Python:
 
-```bash
-cfgx dump configs/finetune.py -o trainer.max_steps=12000 > runs/finetune_config.py
+```python
+from cfgx import load
+
+cfg = load("base.py", overrides=["steps=48000", "lr=expr:value * 0.1"])
 ```
 
-## Options
+## Assignment and deletion
 
-- `-o, --overrides`: One or more override strings, e.g. `key=value`. You can pass
-  multiple values after a single flag or repeat the flag. Values also support
-  `lazy:<expr>` and `update:<expr>` shorthands.
-- `--format {pretty,ruff,raw}`: Formatter to apply (default: `pretty`).
-- `--sort-keys`: Sort dict keys throughout nested dict/list structures (including
-  dict subclasses) before formatting (dump only; default: false).
-- `--no-resolve-lazy`: Print `Lazy` values without resolving them (render only).
+| Override | Meaning |
+| --- | --- |
+| `optimizer.lr=1e-4` | Replace the target value |
+| `optimizer={'lr': 1e-4}` | Replace the whole optimizer dictionary |
+| `optimizer.decay!=` | Delete a dictionary entry |
+| `layers[0].width=128` | Patch an existing sequence element |
+| `options['literal.key']=True` | Select a literal key containing a dot |
+| `lr=expr:value * 0.1` | Transform the target's inherited value |
+| `backbone_lr=expr:final.lr * 0.1` | Contribute a final-value expression |
+
+Each override is a separate ordered layer. Assignment replaces only its target,
+leaving surrounding dictionary fields or sequence elements intact. For dictionary
+paths, `foo.bar=baz` behaves like `{"foo": {"bar": replace("baz")}}`.
+
+Values use Python literal parsing, with an unquoted-string fallback. `expr:`
+evaluates a Python expression with `final`, `previous`, `value`, `computed`,
+`replace`, `delete`, `math`, and ordinary builtins. `x=expr:delete` also deletes.
+Quote overrides at the shell when they contain spaces or shell operators.
+
+```sh
+cfgx render base.py -o 'tags=expr:value.default([]).map("x + [\"debug\"]")'
+```
+
+There are no separate append/remove operators. Express sequence transformations
+with `value.map(...)`, using `x` in string maps. Assigning a literal dictionary
+replaces it; an expression can explicitly combine it with `value` if needed.
+
+## Path rules
+
+Missing dictionary ancestors are created. Existing lists and tuples can be
+indexed, including with negative indices, and are rebuilt around the changed
+element. Indices must already exist; assignment does not extend sequences or
+infer new lists. Missing ancestors are dictionaries, including for integer keys.
+
+Deleting a missing dictionary path is a no-op. Deleting a list/tuple element
+errors; replace or transform the sequence to change its membership. Writes
+through scalars, custom containers, or other opaque objects are rejected.
+Replace the opaque object as a whole instead.
+
+Overrides, including expressions, resolve as part of `load`. There is no separate
+in-place override or lazy-resolution API. To load another variant, reuse the
+sources. Applying overrides to an already resolved snapshot cannot recover its
+original computed relationships.

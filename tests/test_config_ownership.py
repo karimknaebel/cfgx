@@ -1,695 +1,128 @@
-import json
-import pickle
-import sys
-from collections import UserDict, UserList
-from collections.abc import Mapping, Sequence
-from types import ModuleType
+from collections import UserDict
 
 import pytest
 
-from cfgx import (
-    Delete,
-    Lazy,
-    Replace,
-    Update,
-    apply_overrides,
-    dumps,
-    load,
-    merge,
-    resolve_lazy,
-)
-
-
-class Resource:
-    def __init__(self):
-        self.values = [Lazy("c.steps")]
-
-    def __copy__(self):
-        raise AssertionError("Resource must not be copied")
-
-    def __deepcopy__(self, memo):
-        raise AssertionError("Resource must not be deep-copied")
-
-
-def make_config():
-    return {"steps": 10, "tags": ["base"], "rows": [{"value": Lazy("c.steps * 2")}]}
-
-
-def test_merge_copies_only_merged_dictionary_branches():
-    base = {"untouched": {"items": []}, "changed": {"old": [], "remove": True}}
-    override = {"changed": {"new": [], "remove": Delete()}, "added": {"items": []}}
-
-    result = merge(base, override)
-
-    assert result is not base
-    assert result is not override
-    assert result["untouched"] is base["untouched"]
-    assert result["changed"] is not base["changed"]
-    assert result["changed"] is not override["changed"]
-    assert result["changed"]["old"] is base["changed"]["old"]
-    assert result["changed"]["new"] is override["changed"]["new"]
-    assert "remove" not in result["changed"]
-    assert base["changed"]["remove"] is True
-    assert result["added"] is not override["added"]
-    assert result["added"]["items"] is override["added"]["items"]
-
-
-def test_merge_creates_plain_dicts_without_subclass_copy_hooks():
-    class ConfigDict(dict):
-        def copy(self):
-            raise AssertionError("Merge must not delegate ownership to a copy hook")
-
-    base = ConfigDict(branch=ConfigDict(value=1), untouched=ConfigDict(value=2))
-    override = ConfigDict(branch=ConfigDict(value=3), added=ConfigDict(value=4))
-
-    result = merge(base, override)
-
-    assert type(result) is dict
-    assert type(result["branch"]) is dict
-    assert type(result["added"]) is dict
-    assert result["untouched"] is base["untouched"]
-    assert base["branch"]["value"] == 1
-    assert result["branch"]["value"] == 3
-
-
-def test_load_can_split_dictionary_aliases_while_preserving_list_aliases():
-    branch = {"value": 1}
-    rows = [branch]
-    source = {"left": branch, "right": branch, "rows": rows, "other_rows": rows}
-
-    cfg = load(source, overrides=["left.value=2", "rows[0].value=3"])
-
-    assert cfg["left"] == {"value": 2}
-    assert cfg["right"] == {"value": 1}
-    assert cfg["left"] is not cfg["right"]
-    assert cfg["rows"] is cfg["other_rows"] is rows
-    assert cfg["rows"][0] is branch
-    assert source["left"] is source["right"] is branch
-    assert branch == {"value": 3}
-
-
-@pytest.mark.parametrize("operation", [Replace, lambda value: Update(lambda: value)])
-def test_replace_and_update_results_are_installed_without_copying_or_merging(operation):
-    value = {"remove": Delete(), "items": []}
-
-    cfg = load({"value": operation(value)})
-
-    assert cfg["value"] is value
-    assert isinstance(value["remove"], Delete)
-    apply_overrides(cfg, ["value.items+=extra"])
-    assert value["items"] == ["extra"]
-
-
-def test_dict_and_list_subclasses_are_resolved_in_place():
-    writes = []
-
-    class ConfigDict(dict):
-        label = "dict metadata"
-
-        def __setitem__(self, key, value):
-            writes.append(("dict", key, value))
-            super().__setitem__(key, value)
-
-    class ConfigList(list):
-        label = "list metadata"
-
-        def __setitem__(self, key, value):
-            writes.append(("list", key, value))
-            super().__setitem__(key, value)
-
-    branch = ConfigDict(value=Lazy("c.steps"))
-    values = ConfigList([Lazy("c.steps * 2")])
-    cfg = load({"steps": 10, "branch": Replace(branch), "values": values})
-
-    assert cfg["branch"] is branch
-    assert cfg["values"] is values
-    assert branch.label == "dict metadata"
-    assert values.label == "list metadata"
-    assert writes == [("dict", "value", 10), ("list", 0, 20)]
-
-
-@pytest.mark.parametrize(
-    "wrap", [tuple, UserList, lambda values: UserDict(value=values[0])]
-)
-def test_other_containers_are_shared_and_not_resolved(wrap):
-    lazy = Lazy("c.steps")
-    value = wrap([lazy])
-
-    cfg = load({"steps": 10, "value": value, "reference": Lazy("c.value")})
-
-    assert cfg["value"] is value
-    assert cfg["reference"] is value
-    assert value["value" if isinstance(value, UserDict) else 0] is lazy
-
-
-def test_overrides_can_explicitly_traverse_other_container_types():
-    value = UserDict(rows=UserList([{"value": 1}]))
-    cfg = load({"value": value})
-
-    assert apply_overrides(cfg, ["value.rows[0].value=2"]) is cfg
-    assert value["rows"][0] == {"value": 2}
-
-
-@pytest.mark.parametrize(
-    "override, expected",
-    [
-        ("left.items+=c", ["a", "b", "c"]),
-        ("left.items-=a", ["b"]),
-        ("left.items[0]!=", ["b"]),
-        ("left.items[0]=c", ["c", "b"]),
-        ("left.items=update:v.append('c') or v", ["a", "b", "c"]),
-    ],
-)
-def test_overrides_mutate_shared_targets(override, expected):
-    items = ["a", "b"]
-    cfg = {"left": {"items": items}, "right": {"items": items}}
-
-    assert apply_overrides(cfg, [override]) is cfg
-    assert cfg["left"]["items"] is cfg["right"]["items"] is items
-    assert items == expected
-
-
-def test_override_assignment_rebinds_a_key_without_mutating_its_old_value():
-    items = ["a"]
-    cfg = {"left": items, "right": items}
-
-    apply_overrides(cfg, ["left=['b']"])
-
-    assert cfg["left"] == ["b"]
-    assert cfg["left"] is not items
-    assert cfg["right"] is items
-    assert items == ["a"]
-
-
-@pytest.mark.parametrize("existing", [False, True])
-def test_append_only_assigns_a_target_when_creating_it(existing):
-    assignments = []
-
-    class ConfigDict(dict):
-        def __setitem__(self, key, value):
-            assignments.append(key)
-            super().__setitem__(key, value)
-
-    cfg = ConfigDict(items=[]) if existing else ConfigDict()
-
-    apply_overrides(cfg, ["items+=a"])
-
-    assert cfg["items"] == ["a"]
-    assert assignments == ([] if existing else ["items"])
-
-
-@pytest.mark.parametrize("deferred", [False, True])
-def test_update_receives_previous_objects_directly(deferred):
-    items = ["base"]
-    received = []
-
-    def update(value):
-        received.append(value)
-        value.append("extra")
-        return value
-
-    cfg = load(
-        {"items": Lazy(lambda c: items) if deferred else items}, resolve_lazy=False
-    )
-    cfg = merge(cfg, {"items": Update(update)})
-    if deferred:
-        assert received == []
-    resolve_lazy(cfg)
-
-    assert received == [items]
-    assert received[0] is items
-    assert cfg["items"] is items
-    assert items == ["base", "extra"]
-
-
-def test_update_returning_new_values_preserves_previous_values():
-    items = ["base"]
-    base = {"items": items}
-
-    first = load(base, {"items": Update("v + ['first']")})
-    second = load(base, {"items": Update("v + ['second']")})
-
-    assert first["items"] == ["base", "first"]
-    assert second["items"] == ["base", "second"]
-    assert items == ["base"]
-
-
-def test_missing_update_does_not_copy_callable_defaults():
-    def append(items=[]):
-        items.append("extra")
-        return items
-
-    source = {"items": Update(append)}
-    first = load(source)
-    second = load(source)
-
-    assert first["items"] is second["items"] is append.__defaults__[0]
-    assert first["items"] == ["extra", "extra"]
-
-
-def test_arbitrary_objects_are_shared_and_callbacks_can_mutate_them():
-    resource = Resource()
-
-    def update(value):
-        assert value is resource
-        value.values.append("update")
-        return value
-
-    def lazy(c):
-        assert c.resource is resource
-        c.resource.values.append("lazy")
-        return c.resource
-
-    cfg = load(
-        {"resource": resource},
-        {"resource": Update(update), "reference": Lazy(lazy)},
-    )
-
-    assert cfg["resource"] is cfg["reference"] is resource
-    assert isinstance(resource.values[0], Lazy)
-    assert resource.values[1:] == ["update", "lazy"]
-
-
-@pytest.mark.parametrize("reference", ["c.branch", "c.tags"])
-@pytest.mark.parametrize("reference_first", [False, True])
-def test_lazy_container_references_preserve_identity(reference, reference_first):
-    source = {"branch": {"value": 1}, "tags": [1]}
-    if reference_first:
-        cfg = load({"reference": Lazy(reference)}, source)
-    else:
-        cfg = load(source, {"reference": Lazy(reference)})
-    alias = cfg["reference"]
-    key = "value" if reference == "c.branch" else 0
-
-    assert alias is cfg[reference[2:]]
-    alias[key] = 3
-    assert cfg[reference[2:]][key] == 3
-    cfg[reference[2:]][key] = 4
-    assert alias[key] == 4
-
-    apply_overrides(cfg, ["branch={'value': 2}", "tags=[2]"])
-
-    assert alias[key] == 4
-    assert alias is not cfg[reference[2:]]
-    assert resolve_lazy(cfg) is cfg
-    assert cfg["reference"] is alias
-    apply_overrides(cfg, ["branch!=", "tags!="])
-    assert alias[key] == 4
-
-
-@pytest.mark.parametrize("read_first", [False, True])
-def test_lazy_access_through_resolved_references_stays_read_only(read_first):
-    def read(c):
-        assert isinstance(c.reference, Mapping)
-        assert isinstance(c.reference.tags, Sequence)
-        with pytest.raises(TypeError):
-            c.reference["tags"] = []
-        with pytest.raises(TypeError):
-            c.reference.tags[0] = "changed"
-        return c.reference.tags[0]
-
-    source = {"branch": {"tags": ["base"]}, "reference": Lazy("c.branch")}
-    if read_first:
-        cfg = load({"read": Lazy(read)}, source)
-    else:
-        cfg = load(source, {"read": Lazy(read)})
-
-    assert cfg["read"] == "base"
-    assert cfg["reference"] is cfg["branch"]
-
-
-def test_update_over_lazy_reference_receives_the_proxy():
-    received = []
-
-    def update(value):
-        received.append(value)
-        return [*value, "extra"]
-
-    cfg = load(
-        {"tags": ["base"], "extended": Lazy("c.tags")}, {"extended": Update(update)}
-    )
-
-    assert isinstance(received[0], Sequence)
-    assert not isinstance(received[0], list)
-    assert cfg["extended"] == ["base", "extra"]
-    assert cfg["tags"] == ["base"]
-
-
-@pytest.mark.parametrize("references_first", [False, True])
-def test_lazy_returned_containers_and_nested_references_are_not_copied(
-    references_first,
-):
-    returned = {"value": Lazy("c.steps")}
-    references = []
-
-    def make_references(c):
-        references.extend([c.branch, {"nested": [c.branch]}])
-        return references
-
-    source = {"steps": 10, "branch": Lazy(lambda c: returned)}
-    if references_first:
-        cfg = load({"references": Lazy(make_references)}, source)
-    else:
-        cfg = load(source, {"references": Lazy(make_references)})
-
-    assert cfg["branch"] is returned
-    assert cfg["references"] is references
-    assert references[0] is references[1]["nested"][0] is returned
-    assert returned == {"value": 10}
-    apply_overrides(cfg, ["branch={'value': 20}"])
-    assert references[0]["value"] == 10
-
-
-@pytest.mark.parametrize(
-    "wrap", [tuple, UserList, lambda values: UserDict(value=values[0])]
-)
-def test_lazy_returned_other_containers_are_not_unwrapped(wrap):
-    cfg = load({"tags": [1], "reference": Lazy(lambda c: wrap([c.tags]))})
-    proxy = cfg["reference"]["value" if isinstance(cfg["reference"], UserDict) else 0]
-
-    assert isinstance(proxy, Sequence)
-    assert proxy is not cfg["tags"]
-    apply_overrides(cfg, ["tags=[2]"])
-    assert proxy[0] == 2
-
-
-@pytest.mark.parametrize("expression", ["c.rows[:]", "list(c.rows)", "dict(c.branch)"])
-def test_lazy_container_copies_unwrap_nested_references(expression):
-    cfg = load(
-        {
-            "copy": Lazy(expression),
-            "rows": [{"tags": [Lazy("c.steps")]}],
-            "branch": {"tags": Lazy("c.rows[0].tags")},
-            "steps": 10,
-        }
-    )
-
-    if isinstance(cfg["copy"], list):
-        assert cfg["copy"] is not cfg["rows"]
-        assert cfg["copy"][0] is cfg["rows"][0]
-        assert cfg["copy"] == [{"tags": [10]}]
-    else:
-        assert cfg["copy"] is not cfg["branch"]
-        assert cfg["copy"]["tags"] is cfg["branch"]["tags"]
-        assert cfg["copy"] == {"tags": [10]}
-
-
-@pytest.mark.parametrize("update", ["v", "{'nested': [v]}"])
-def test_update_over_lazy_reference_returns_underlying_container(update):
-    cfg = load(
-        {"reference": Lazy("c.tags"), "tags": [Lazy("c.steps")], "steps": 10},
-        {"reference": Update(update)},
-    )
-
-    alias = cfg["reference"] if update == "v" else cfg["reference"]["nested"][0]
-    assert alias is cfg["tags"]
-    assert alias == [10]
-
-
-def test_lazy_reference_chains_preserve_identity():
-    cfg = load(
-        {
-            "first": Lazy("c.second"),
-            "nested": Lazy("c.first.tags"),
-            "second": Lazy("c.branch"),
-            "branch": {"tags": [Lazy("c.steps")]},
-            "steps": 10,
-        }
-    )
-
-    assert cfg["first"] is cfg["second"] is cfg["branch"]
-    assert cfg["nested"] is cfg["branch"]["tags"]
-    assert cfg["nested"] == [10]
-
-
-@pytest.mark.parametrize("container_type", [dict, list])
-def test_lazy_references_to_ancestor_containers(container_type):
-    branch = (
-        {"parent": Lazy("c.branch"), "root": Lazy("c")}
-        if container_type is dict
-        else [Lazy("c.branch"), Lazy("c")]
-    )
-    cfg = load({"branch": branch, "value": Lazy("1 + 1")})
-
-    assert cfg["branch"]["parent" if container_type is dict else 0] is cfg["branch"]
-    assert cfg["branch"]["root" if container_type is dict else 1] is cfg
-    assert cfg["value"] == 2
-    assert resolve_lazy(cfg) is cfg
-
-
-def test_lazy_references_serialize_as_ordinary_containers(tmp_path):
-    cfg = load(
-        {
-            "reference": Lazy("c.branch"),
-            "nested": Lazy(lambda c: [{"tags": c.branch.tags}]),
-            "branch": {"tags": [Lazy("c.steps")]},
-            "steps": 10,
-        }
-    )
-    expected = {
-        "reference": {"tags": [10]},
-        "nested": [{"tags": [10]}],
-        "branch": {"tags": [10]},
-        "steps": 10,
+from cfgx import ConfigError, computed, final, load, replace, value
+
+
+def test_source_aliases_and_output_references_are_independent():
+    shared = {"items": [{"x": 1}]}
+    source = {"a": shared, "b": shared, "c": final.a}
+    result = load(source, {"a": {"items": [{"x": 2}]}})
+    result["a"]["items"][0]["x"] = 3
+    assert source["a"] == {"items": [{"x": 1}]}
+    assert result["b"] == {"items": [{"x": 1}]}
+    assert result["c"] == {"items": [{"x": 2}]}
+    assert result["a"] is not result["c"]
+    assert result["b"] is not shared
+
+
+def test_repeated_sequence_items_are_independent():
+    shared = {"x": []}
+    result = load({"items": [shared, shared], "tuple": (shared, shared)})
+    result["items"][0]["x"].append(1)
+    assert result["items"][1] == {"x": []}
+    assert result["tuple"] == ({"x": []}, {"x": []})
+    assert result["tuple"][0] is not result["tuple"][1]
+    assert shared == {"x": []}
+
+
+def test_reusing_sources_recomputes_without_mutation():
+    source = {"x": 2, "items": [final.x]}
+    assert load(source, overrides=["x=3"])["items"] == [3]
+    assert load(source, overrides=["x=4"])["items"] == [4]
+    assert load(source)["items"] == [2]
+
+
+def test_callback_inputs_are_copies():
+    def mutate(get):
+        first = get(final.a)
+        first.append(2)
+        assert get(final.a) == [1]
+        return first
+
+    source = {"a": [1], "b": computed(mutate)}
+    assert load(source) == {"a": [1], "b": [1, 2]}
+    assert source["a"] == [1]
+
+
+def test_previous_map_input_is_copied():
+    original = {"items": [1]}
+
+    def mutate(x):
+        x.append(2)
+        return x
+
+    assert load(original, {"items": value.map(mutate)}) == {"items": [1, 2]}
+    assert original == {"items": [1]}
+
+
+def test_producer_output_is_captured_before_external_mutation():
+    shared = {"a": [1]}
+
+    def mutate(get):
+        get(final.produced.keys())
+        shared["a"].append(2)
+        shared["b"] = 3
+        return get(final.produced)
+
+    assert load(
+        {"copy": computed(mutate), "produced": computed(lambda get: shared)}
+    ) == {
+        "copy": {"a": [1]},
+        "produced": {"a": [1]},
     }
 
-    assert json.loads(json.dumps(cfg)) == expected
-    restored = pickle.loads(pickle.dumps(cfg))
-    assert restored == expected
-    assert restored["reference"] is restored["branch"]
-    assert restored["nested"][0]["tags"] is restored["branch"]["tags"]
 
-    snapshot = tmp_path / "snapshot.py"
-    for format in ("raw", "pretty", "ruff"):
-        snapshot.write_text(dumps(cfg, format=format))
-        assert load(snapshot) == expected
+def test_opaque_leaves_keep_identity():
+    class CustomList(list):
+        pass
+
+    expression = final.x
+    custom = CustomList([expression])
+    mapping = UserDict({"a": [1]})
+    opaque_set = {1, 2}
+    result = load({"x": 2, "custom": custom, "mapping": mapping, "set": opaque_set})
+    assert result["custom"] is custom
+    assert result["mapping"] is mapping
+    assert result["set"] is opaque_set
+    assert custom[0] is expression
 
 
-@pytest.mark.parametrize("read_first", [False, True])
-@pytest.mark.parametrize("container_type", [dict, list])
-def test_lazy_commits_returned_container_before_resolving_its_children(
-    read_first, container_type
-):
-    returned = []
-
-    def make_branch(c):
-        if container_type is dict:
-            branch = {"value": len(returned) + 1, "derived": Lazy("c.branch.value * 2")}
-        else:
-            branch = [len(returned) + 1, Lazy("c.branch[0] * 2")]
-        returned.append(branch)
-        return branch
-
-    source = {"branch": Lazy(make_branch)}
-    if read_first:
-        source = {
-            "read": Lazy(
-                "c.branch.derived" if container_type is dict else "c.branch[1]"
-            ),
-            **source,
+def test_explicit_opaque_reads_and_copied_supported_results():
+    mapping = UserDict({"x": [3]})
+    result = load(
+        {
+            "opaque": mapping,
+            "read": final.opaque.x,
+            "size": final.opaque.len(),
+            "keys": final.opaque.keys(),
         }
-
-    cfg = load(source)
-
-    assert len(returned) == 1
-    assert cfg["branch"] is returned[0]
-    assert cfg["branch"] == (
-        {"value": 1, "derived": 2} if container_type is dict else [1, 2]
     )
-    if read_first:
-        assert cfg["read"] == 2
+    assert result["read"] == [3]
+    assert result["size"] == 1
+    assert result["keys"] == ["x"]
+    result["read"].append(4)
+    assert mapping["x"] == [3]
 
 
-def test_lazy_in_aliased_container_is_replaced_once():
-    calls = []
-
-    def compute(c):
-        calls.append(c.steps)
-        return c.steps * 2
-
-    values = [Lazy(compute)]
-    cfg = {"steps": 10, "read": Lazy("c.right[0]"), "left": values, "right": values}
-
-    assert resolve_lazy(cfg) is cfg
-    assert resolve_lazy(cfg) is cfg
-    assert calls == [10]
-    assert cfg["read"] == 20
-    assert cfg["left"] is cfg["right"] is values
-    assert values == [20]
+def test_dict_contribution_can_replace_opaque_but_override_cannot_write_through_it():
+    mapping = UserDict({"x": 1})
+    assert load({"a": mapping}, {"a": {"y": 2}}) == {"a": {"y": 2}}
+    with pytest.raises(TypeError, match="opaque"):
+        load({"a": mapping}, overrides=["a.x=2"])
+    assert mapping == {"x": 1}
 
 
-def test_lazy_wrapper_itself_does_not_cache_across_slots_or_loads():
-    calls = []
-
-    def compute(c):
-        calls.append(c.steps)
-        return c.steps * 2
-
-    lazy = Lazy(compute)
-    source = {"steps": 10, "left": lazy, "right": lazy}
-
-    assert load(source)["left"] == 20
-    assert load(source, overrides=["steps=20"])["right"] == 40
-    assert calls == [10, 10, 20, 20]
-    assert source["left"] is source["right"] is lazy
+def test_replace_does_not_preserve_supported_container_identity():
+    source = {"x": []}
+    result = load({"branch": replace(source)})
+    assert result["branch"] is not source
+    assert result["branch"]["x"] is not source["x"]
 
 
-def test_lazy_cycle_in_a_returned_container_raises():
-    cfg = {"branch": Lazy(lambda c: {"value": Lazy("c.branch.value")})}
-
-    with pytest.raises(ValueError, match="Lazy cycle detected at branch.value"):
-        resolve_lazy(cfg)
-    assert isinstance(cfg["branch"], dict)
-    assert isinstance(cfg["branch"]["value"], Lazy)
-
-
-def test_lazy_cycle_through_a_container_reference_raises():
-    cfg = {
-        "reference": Lazy("c.branch"),
-        "branch": {"value": Lazy("c.reference.value")},
-    }
-
-    with pytest.raises(ValueError, match="Lazy cycle detected at reference.value"):
-        resolve_lazy(cfg)
-    assert cfg["reference"] is cfg["branch"]
-    assert isinstance(cfg["branch"]["value"], Lazy)
-
-
-@pytest.mark.parametrize("source_kind", ["file", "inline", "factory"])
-def test_fresh_sources_produce_independent_variants(tmp_path, source_kind):
-    path = tmp_path / "base.py"
-    code = (
-        "from cfgx import Lazy\n"
-        "config = {'steps': 10, 'tags': ['base'], 'rows': [{'value': Lazy('c.steps * 2')}]}\n"
-    )
-    path.write_text(code)
-
-    def source():
-        if source_kind == "file":
-            return path
-        if source_kind == "factory":
-            return make_config()
-        return {"steps": 10, "tags": ["base"], "rows": [{"value": Lazy("c.steps * 2")}]}
-
-    first = load(source(), overrides=["steps=20", "tags+=first"])
-    second = load(source(), overrides=["steps=30", "tags+=second"])
-
-    assert first == {"steps": 20, "tags": ["base", "first"], "rows": [{"value": 40}]}
-    assert second == {"steps": 30, "tags": ["base", "second"], "rows": [{"value": 60}]}
-    assert first["tags"] is not second["tags"]
-    assert first["rows"][0] is not second["rows"][0]
-    assert path.read_text() == code
-
-
-@pytest.mark.parametrize(
-    "prepare", [lambda base: base, dict.copy, lambda base: merge(base, {})]
-)
-def test_reusing_a_base_or_shallow_copy_shares_mutation_and_resolved_lazies(prepare):
-    base = make_config()
-
-    first = load(prepare(base), overrides=["steps=20", "tags+=first"])
-    second = load(prepare(base), overrides=["steps=30", "tags+=second"])
-
-    assert first["tags"] is second["tags"] is base["tags"]
-    assert first["tags"] == ["base", "first", "second"]
-    assert first["rows"] is second["rows"] is base["rows"]
-    assert second["rows"] == [{"value": 40}]
-    assert base["steps"] == 10
-
-
-def test_variants_of_an_unresolved_loaded_base_still_share_values():
-    base = load(make_config(), resolve_lazy=False)
-    first = merge(base, {"steps": 20})
-    second = merge(base, {"steps": 30})
-
-    resolve_lazy(first)
-    resolve_lazy(second)
-
-    assert base["rows"] is first["rows"] is second["rows"]
-    assert second["rows"] == [{"value": 40}]
-
-
-def test_explicit_copies_of_known_containers_allow_reusing_a_template():
-    base = make_config()
-    resource = Resource()
-
-    def fresh_base():
-        return {
-            **base,
-            "tags": list(base["tags"]),
-            "rows": [dict(row) for row in base["rows"]],
-            "resource": resource,
-        }
-
-    first = load(fresh_base(), overrides=["steps=20", "tags+=first"])
-    second = load(fresh_base(), overrides=["steps=30", "tags+=second"])
-
-    assert first["rows"] == [{"value": 40}]
-    assert second["rows"] == [{"value": 60}]
-    assert first["tags"] == ["base", "first"]
-    assert second["tags"] == ["base", "second"]
-    assert base["tags"] == ["base"]
-    assert isinstance(base["rows"][0]["value"], Lazy)
-    assert first["resource"] is second["resource"] is resource
-
-
-def test_fresh_file_loads_can_consume_imported_mutable_values(tmp_path, monkeypatch):
-    shared = ModuleType("_cfgx_shared_config")
-    shared.rows = [{"value": Lazy("c.steps * 2")}]
-    shared.tags = ["base"]
-    shared.resource = Resource()
-    monkeypatch.setitem(sys.modules, shared.__name__, shared)
-    path = tmp_path / "config.py"
-    path.write_text(
-        "from _cfgx_shared_config import rows, tags, resource\n"
-        "config = {'steps': 10, 'rows': rows, 'tags': tags, 'resource': resource}\n"
-    )
-
-    first = load(path, overrides=["steps=20", "tags+=first"])
-    second = load(path, overrides=["steps=30", "tags+=second"])
-
-    assert first["rows"] is second["rows"] is shared.rows
-    assert shared.rows == [{"value": 40}]
-    assert first["tags"] is second["tags"] is shared.tags
-    assert shared.tags == ["base", "first", "second"]
-    assert first["resource"] is second["resource"] is shared.resource
-
-
-def test_file_importing_a_factory_creates_independent_variants(tmp_path, monkeypatch):
-    shared = ModuleType("_cfgx_config_factory")
-    shared.make_config = make_config
-    monkeypatch.setitem(sys.modules, shared.__name__, shared)
-    path = tmp_path / "config.py"
-    path.write_text(
-        "from _cfgx_config_factory import make_config\nconfig = make_config()\n"
-    )
-
-    first = load(path, overrides=["steps=20", "tags+=first"])
-    second = load(path, overrides=["steps=30", "tags+=second"])
-
-    assert first["rows"] == [{"value": 40}]
-    assert second["rows"] == [{"value": 60}]
-    assert first["tags"] == ["base", "first"]
-    assert second["tags"] == ["base", "second"]
-
-
-def test_failed_operations_do_not_roll_back_mutations():
-    items = []
-
-    def fail(value):
-        value.append("before error")
-        raise RuntimeError("update failed")
-
-    with pytest.raises(RuntimeError, match="update failed"):
-        merge({"items": items}, {"items": Update(fail)})
-    assert items == ["before error"]
-
-    cfg = {"items": items, "resolved": Lazy("1 + 1"), "failed": Lazy("1 / 0")}
-    with pytest.raises(ValueError, match="not a list"):
-        apply_overrides(cfg, ["items+=extra", "resolved+=invalid"])
-    assert items == ["before error", "extra"]
-
-    with pytest.raises(ZeroDivisionError):
-        resolve_lazy(cfg)
-    assert cfg["resolved"] == 2
-    assert isinstance(cfg["failed"], Lazy)
+def test_raw_container_cycles_error():
+    source = []
+    source.append(source)
+    with pytest.raises(ConfigError, match="Cyclic Python container"):
+        load({"x": source})

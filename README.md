@@ -2,124 +2,80 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/cfgx.svg)](https://pypi.org/project/cfgx/)
 
-Python-first config loader with config composition, lazy computed values, and CLI-style overrides.
+Python configs with ordered composition, computed values, and CLI overrides.
+Loading produces an ordinary dictionary. Configuration logic stays in Python.
 
-Docs: https://karimknaebel.github.io/cfgx/
+[Documentation](https://karimknaebel.github.io/cfgx/)
 
-## Install
-
-```bash
+```sh
 pip install cfgx
 ```
 
-## Quick start
-
-Example config file:
+Define a base:
 
 ```python
-# configs/model.py
+# base.py
+from cfgx import final
+
 config = {
-    "model": {"name": "resnet18"},
-    "optimizer": {"lr": 3e-4},
+    "steps": 96_000,
+    "lr": 3e-4,
+    "backbone_lr": final.lr * 0.1,
+    "cooldown_steps": final.steps // 10,
 }
 ```
+
+Compose a variant with a tuple of sources:
+
+```python
+# finetune.py
+from cfgx import value
+
+config = "base.py", {"steps": 48_000, "lr": value * 0.5}
+```
+
+Load it with optional overrides:
 
 ```python
 from cfgx import load
 
-cfg = load("configs/model.py", overrides=["optimizer.lr=1e-3"])
+cfg = load("finetune.py", overrides=["lr=expr:value * 0.1"])
+assert cfg["steps"] == 48_000
+assert cfg["backbone_lr"] == cfg["lr"] * 0.1
 ```
 
-Works well with [`specbuild`](https://github.com/karimknaebel/specbuild) when you want to build your model and other classes from config dictionaries.
+Dictionaries merge recursively, including computed dictionaries. Lists and tuples
+replace earlier sequences. Use `replace(x)` to replace a dictionary and `delete`
+to remove a dictionary entry.
 
-## Composition model
-
-Declare a dictionary, or a list of dictionaries and file paths:
-
-```python
-config = ["foo.py", {"x": 3}, "bar.py"]
-```
-
-cfgx expands file references, concatenates config lists, then merges the
-dictionaries from left to right. It applies overrides afterward, then resolves
-`Lazy` values. Lists inside dictionaries remain ordinary config data.
-
-`Delete`, `Replace`, and `Update` act on the accumulated result at their position
-in the sequence. Referenced configs are not merged independently, and repeated
-references are applied each time they occur. Every file must define `config`.
-The same composition works directly as `load("foo.py", {"x": 3}, "bar.py")`. See
-[Config composition](docs/composition.md) for examples and the implications for
-reusing configs.
-
-Loading can modify mutable source values. For independent variants, create fresh
-values for each load; see [Reusing configs](docs/composition.md#ownership-and-mutation).
-
-## Advanced example
-
-Base config:
+- `final.lr` reads the complete config, including later files and overrides.
+- `value` reads the inherited value at the current location.
+- `previous.lr` reads earlier definitions at another path.
+- `final(1).lr` reads a sibling; `previous(1).lr` reads its inherited definition.
+- `expr.map(fn)` transforms a resolved value. `expr.map("x * 2")` is shorthand.
+- `computed(lambda get: ...)` supports dynamic, conditional reads with `get(expr)`.
+- `.default(...)`, `.keys()`, `.len()`, and `.exists()` compose with other expressions.
 
 ```python
-# configs/base.py
-from cfgx import Lazy
+from cfgx import computed, delete, final
 
 config = {
-    "model": {"depth": 8, "width": 512},
-    "optimizer": {
-        "lr": 3e-4,
-        "weight_decay": 0.01,
-        "schedule": {"type": "linear", "warmup_steps": 1_000},
-    },
-    "trainer": {
-        "max_steps": 50_000,
-        "hooks": ["progress", "checkpoint"],
-        "stages": [{"name": "warmup", "max_steps": 5_000}],
-        "log_every": Lazy("c.trainer.max_steps // 100"),
-    },
+    "resume": False,
+    "checkpoint": computed(
+        lambda get: get(final.checkpoint_path) if get(final.resume) else delete
+    ),
 }
 ```
 
-Derived config:
+Exact built-in dictionaries, lists, and tuples are rebuilt independently for each
+output location. Other objects are opaque and retain identity. Avoid side effects
+when working with opaque values or unknown types.
 
-```python
-# configs/finetune.py
-from cfgx import Delete, Lazy, Replace
+See [composition](docs/composition.md), [expressions](docs/expressions.md),
+[overrides](docs/cli.md), and the [resolution contract](docs/design.md).
+[Training example](examples/training/README.md) demonstrates a compact setup
+with model and dataset composition, learning-rate scaling, computed checkpoints,
+and dataset transformations.
 
-config = [
-    "base.py",
-    {
-        "model": {"depth": 12},
-        "optimizer": {
-            "weight_decay": Delete(),
-            "schedule": Replace({"type": "cosine", "t_max": 40_000}),
-        },
-        "trainer": {"max_steps": 10_000},
-        "scheduler": {
-            "warmup_steps": 500,
-            "decay_steps": Lazy(
-                lambda c: c.trainer.max_steps - c.scheduler.warmup_steps
-            ),
-        },
-    },
-]
-```
-
-Load, override, and snapshot:
-
-```python
-from cfgx import dump, format, load
-
-cfg = load(
-    "configs/finetune.py",
-    overrides=[
-        "optimizer.lr=1e-4",
-        "trainer.hooks+=wandb",
-        "trainer.hooks-='checkpoint'",
-        "trainer.stages[0].max_steps=2_000",
-        "scheduler.warmup_steps=lazy:c.trainer.max_steps * 0.1",
-    ],
-)
-
-print(format(cfg))
-with open("runs/finetune_config.py", "w") as f:
-    dump(cfg, f, format="ruff")
-```
+Snapshots and formatting remain available through `dump`, `dumps`, and `format`.
+A snapshot preserves resolved values, not their formulas.

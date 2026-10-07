@@ -4,293 +4,104 @@ icon: lucide/settings
 
 # cfgx
 
-Keep configuration logic in regular Python modules. Start with a single dictionary, then compose configs in order, compute values lazily, and apply CLI-friendly overrides without learning a new DSL.
+Keep configuration logic in Python files, compose them in order, and load an
+ordinary dictionary with computed values resolved against the complete config.
 
-> Everything you write stays Python: functions, conditionals, list comprehensions, imports. `cfgx` focuses on loading and merging dictionaries so you can drop the result into any workflow.
-
-## Highlights
-
-- Load any Python config module with `load`.
-- Compose configs with `config = ["base.py", {"x": 3}, "model.py"]` or pass the list directly to `load`.
-- Compute values lazily with `Lazy`.
-- Transform previous values with `Update`.
-- Adjust values on the fly using `apply_overrides` and a compact CLI syntax.
-- Control merge behavior with `Delete()` and `Replace(value)`.
-- Snapshot final dictionaries back to Python with `dump`, or pretty-print them with `format`.
-
-## Core workflow
-
-Start with a config file, load it, and apply CLI-style tweaks.
-
-!!! example "Define a config"
-    ```python
-    # configs/base.py
-    config = {
-        "model": {"name": "resnet18"},
-        "trainer": {"max_steps": 50_000},
-    }
-    ```
-
-!!! example "Load with overrides"
-    ```python
-    from cfgx import load
-
-    cfg = load("configs/base.py", overrides=["trainer.max_steps=12_000"])
-    ```
-
-The result is a plain dictionary you can serialize, log, or feed into factories.
-
-## Config modules
-
-Each config file is just Python and must declare `config` as a dictionary or a
-list of dictionaries and file paths. Use `{}` or `[]` for an empty config.
-
-!!! example "Compose configs"
-    ```python
-    # configs/finetune.py
-    config = [
-        "base.py",
-        {"trainer": {"max_steps": 10_000}},
-        "schedules/cosine.py",
-    ]
-    ```
-
-cfgx expands file references, concatenates config lists, then merges the
-dictionaries from left to right. Referenced paths are relative to the declaring
-file. Lists inside dictionaries remain ordinary data.
-
-See [Config composition](composition.md) for the full behavior, including repeated
-references and why referenced configs are not merged independently.
-
-You can also pass dictionaries and paths directly to `load`, either as separate
-arguments or in a list. These paths are relative to the working directory.
-The `overrides` and `resolve_lazy` options are keyword-only.
-
-!!! example "Compose configs directly"
-    ```python
-    from cfgx import load
-
-    cfg = load(
-        "configs/base.py",
-        "configs/backbones/resnet.py",
-        {"trainer": {"max_steps": 10_000}},
-        "configs/modes/eval.py",
-    )
-    ```
-
-## Runtime overrides
-
-Overrides can be passed to `load` or applied later with
-`apply_overrides(config_dict, sequence_of_strings)`, which mutates the
-dictionary in place. Each string uses a compact syntax designed for CLI usage.
-
-- `path=value` → assign (dict keys or list indices)
-- `path+=value` → append to a list
-- `path-=value` → remove a matching element from a list
-- `path!=` → delete a key or remove a list index
-
-Values are parsed with `ast.literal_eval`, so strings, numbers, booleans, lists,
-dictionaries, and `None` all work. If parsing fails, the raw string is used, so
-most string values do not need to be quoted. You can also use `lazy:` to define
-a `Lazy` expression and `update:` to define an `Update` expression from the CLI
-(see [Lazy values](#lazy-values) and [Update values](#update-values)).
-
-Assignments create intermediate dicts and extend lists with `None` as needed.
-List indices follow Python semantics: negative indices are allowed when the list
-already exists and are in range (otherwise `IndexError`). Deletes and list
-removals are forgiving no-ops when the path is missing or out of range.
-
-!!! example "Override syntax"
-    ```python
-    from cfgx import apply_overrides
-
-    apply_overrides(
-        cfg,
-        [
-            "optimizer.lr=5e-4",
-            "trainer.max_steps=10_000",
-            "trainer.hooks+='wandb'",
-            "trainer.hooks-='checkpoint'",
-            "data.pipeline[0]!=",
-            "trainer.warmup_steps=lazy:c.trainer.max_steps * 0.1",
-            "trainer.max_steps=update:v + 1000",
-        ],
-    )
-    ```
-
-## Merge semantics
-
-When configs are merged, `cfgx` walks the override dictionary and combines it
-with the base using:
-
-- Dicts merge recursively.
-- `Delete()` removes the key entirely.
-- `Replace(value)` uses `value` as-is without deeper merging.
-- `Update(fn_or_expr)` transforms the previous value at that path.
-- Otherwise the override value replaces the base.
-
-!!! example "Delete and Replace"
-    ```python
-    from cfgx import Delete, Replace, merge
-
-    base = {
-        "optimizer": {
-            "lr": 3e-4,
-            "weight_decay": 0.01,
-            "schedule": {"type": "linear", "warmup": 1_000},
-        },
-        "trainer": {"hooks": ["progress", "checkpoint"]},
-    }
-
-    override = {
-        "optimizer": {
-            "weight_decay": Delete(),
-            "schedule": Replace({"type": "cosine", "t_max": 20_000}),
-        },
-        "trainer": {"steps": 10_000, "hooks": ["progress"]},
-    }
-
-    merged = merge(base, override)
-    ```
-
-`merge` is exported in case you want to reuse the algorithm, but `load` already
-relies on it internally. The result can share mutable values with its inputs;
-see [Ownership and mutation](composition.md#ownership-and-mutation).
-
-## Update values
-
-Use `Update` to transform the previous value at the same path.
-
-`Update` applies during merge or through an `update:` override:
-
-- If the previous value is concrete, the update runs immediately.
-- If the previous value is `Lazy`, cfgx composes a new `Lazy` and the update runs
-  when that lazy resolves.
-
-`Update` can be defined from a callable (`lambda v: ...`) or a string
-expression (`"v + [1]"`). String expressions get `v` and `math`.
-
-!!! example "Update from the previous value"
-    ```python
-    from cfgx import Update
-
-    config = [
-        "base.py",
-        {
-            "trainer": {
-                "hooks": Update(lambda v: [*v, "wandb"]),
-                "max_steps": Update("v + 1_000"),
-            },
-        },
-    ]
-    ```
-
-!!! note
-    For missing keys, callable updates are invoked with no argument. A default
-    argument such as `lambda v=0: v + 1` handles this case. String updates
-    require an existing value.
-
-Updates receive the previous object directly. Prefer returning a new value,
-such as `[*v, "wandb"]`, to avoid modifying values shared with another config.
-When updating a `Lazy` container reference, the update receives the read-only
-proxy used during lazy evaluation. Any proxies in the resulting dictionaries
-and lists are unwrapped when the result is resolved.
-
-## Lazy values
-
-Use `Lazy` for values that should be computed from the merged config. A `Lazy`
-receives `c`, a read-only proxy for the config where dicts are `Mapping`s and
-lists are `Sequence`s. You can use attribute access (`c.trainer.max_steps`),
-string keys (`c["trainer"]["max_steps"]`), and list indices
-(`c.trainer.stages[0].max_steps`). String expressions can also use `math` and
-Python builtins. Lazy values are resolved in place after loading (or when you
-call `resolve_lazy`) inside nested dictionaries and lists.
-
-Returned container proxies become references to the underlying dictionaries
-and lists, including proxies nested in dictionaries and lists returned by a
-callback. Containers are not copied. For example, `Lazy("c.tags")` resolves to
-the same list as `tags`:
+## Define and compose
 
 ```python
-from cfgx import Lazy, load
+# base.py
+from cfgx import final
 
-cfg = load({"tags": ["base"], "reference": Lazy("c.tags")})
-assert cfg["reference"] is cfg["tags"]
-
-cfg["reference"].append("extra")
-assert cfg["tags"] == ["base", "extra"]
-
-cfg["tags"] = ["replacement"]
-assert cfg["reference"] == ["base", "extra"]
+config = {
+    "steps": 96_000,
+    "cooldown_steps": final.steps // 10,
+    "lr": 3e-4,
+    "backbone_lr": final.lr * 0.1,
+    "optimizer": {"type": "AdamW", "weight_decay": 0.01},
+}
 ```
 
-These are ordinary object references: mutations are shared, but replacing or
-deleting the original config key does not change the reference. The resolved
-containers support normal serialization. JSON and cfgx snapshots preserve
-values; pickle also preserves shared references. Serialization still depends
-on the contents and the format's support for cycles.
+```python
+# finetune.py
+from cfgx import delete, value
 
-As with lazy evaluation, unwrapping only traverses dictionaries and lists.
-Other objects, including tuples and custom mappings, are left as-is; proxies
-stored inside them remain proxies.
+config = (
+    "base.py",
+    {
+        "steps": 48_000,
+        "lr": value * 0.5,
+        "optimizer": {"weight_decay": delete},
+    },
+)
+```
 
-!!! warning
-    The proxy references the original config values. Avoid side effects inside
-    Lazy functions and don't rely on any specific resolution order. Arbitrary
-    Python objects accessed through the proxy retain their own mutation behavior.
-    See [Ownership and mutation](composition.md#ownership-and-mutation) for how
-    lazy resolution itself can affect shared containers.
+A dictionary alone is shorthand for a one-element tuple. Tuples compose sources;
+inside the config, tuples and lists are ordinary sequence data. Dictionaries
+merge recursively, and file references are relative to the declaring file.
 
-!!! example "Lazy with a function"
-    ```python
-    from cfgx import Lazy
+## Load and override
 
-    config = {
-        "trainer": {"max_steps": 50_000},
-        "scheduler": {
-            "warmup_steps": 1_000,
-            "decay_steps": Lazy(
-                lambda c: c.trainer.max_steps - c.scheduler.warmup_steps
-            ),
-        },
-    }
-    ```
+```python
+from cfgx import load
 
-!!! example "Lazy from an expression"
-    ```python
-    from cfgx import Lazy
+cfg = load("finetune.py", overrides=["steps=24_000"])
+assert cfg["cooldown_steps"] == 2_400
+assert cfg["backbone_lr"] == cfg["lr"] * 0.1
+```
 
-    config = {
-        "trainer": {"max_steps": 50_000},
-        "warmup_steps": Lazy("c.trainer.max_steps * 0.1"),
-    }
-    ```
+All sources and overrides participate in one composition. `final` reads the
+complete composition; `value` reads earlier definitions at its own location.
+The result contains ordinary Python values and has no ongoing reactive behavior.
 
-## Formatting and snapshots
+```sh
+cfgx render finetune.py -o 'steps=24000' 'lr=expr:value * 0.1'
+cfgx dump finetune.py --format pretty > snapshot.py
+```
 
-Freeze the exact configuration you ran:
+## Calculate with Python
 
-!!! example "Format or dump configs"
-    ```python
-    from pathlib import Path
-    from cfgx import dump, format
+Use arithmetic for simple expressions, `.map` for a transformation of one value,
+and `computed` for calculations that read several values or choose dependencies
+conditionally:
 
-    print(format(cfg))
-    with Path("runs/2026-01-12/config_snapshot.py").open("w") as f:
-        dump(cfg, f, format="ruff")
-    ```
+```python
+from cfgx import computed, final, value
 
-- `format` returns a string derived from `repr(cfg)`; it defaults to `pretty` formatting and supports `format="raw"` for raw `repr` output or `format="ruff"` for Ruff formatting.
-- `dump` writes a loadable snapshot prefixed with `config =`; `dumps` returns the same snapshot string; both default to `pretty` formatting and accept `format="raw"` for raw output.
-- `sort_keys=True` sorts dict keys throughout nested dict/list structures, including
-  dict subclasses.
-- These are best-effort snapshots: you're responsible for `repr()` being valid Python
-  that can recreate the config. If it isn't, formatting can raise (for example, on a
-  syntax error) or `load` may fail because required imports are missing.
+config = {
+    "checkpointing": {
+        "keep_steps": value.default(()).map(
+            lambda x: [*x, final.steps - final.cooldown_steps]
+        ),
+    },
+    "effective_batch": computed(
+        lambda get: int(get(final.batch_size)) * get(final.accumulation)
+    ),
+}
+```
 
-## Tips for structuring configs
+Callbacks receive fully resolved values. Returned dictionaries, lists, and tuples
+may contain new expressions. See [Expressions](expressions.md) for precise reads,
+relative references, missing values, and cycles.
 
-- Organize by concern: `configs/base.py`, `configs/data/imagenet.py`, `configs/model/resnet.py`.
-- Expose helper functions alongside `config` for reusable snippets.
-- Prefer `Lazy` for repeated derived values, e.g. a single base learning rate that feeds multiple param groups (`backbone_lr = base_lr * 0.1`).
-- Prefer `Update` when changing a previous value at the same key, especially for lists and incremental numeric adjustments.
+## Ownership
+
+cfgx structurally copies exact built-in dictionaries, lists, and tuples. Reusing a
+source container or referring to it through `final` does not share mutable output
+containers. Other Python objects, including container subclasses, are opaque and
+retain identity. Avoid side effects when their behavior or type is uncertain.
+
+## Snapshots
+
+```python
+from cfgx import dump, format
+
+print(format(cfg))
+with open("snapshot.py", "w") as fd:
+    dump(cfg, fd)
+```
+
+`format`, `dump`, and `dumps` accept `format="pretty"` (the default), `"raw"`, or
+`"ruff"`, and `sort_keys=True`. Ruff formatting requires `cfgx[format]`.
+Snapshots use Python representations; custom objects may require imports or may
+not have a reloadable representation. A snapshot stores values, not expressions.

@@ -1,26 +1,19 @@
-from .config import (
-    Delete,
-    Lazy,
-    Replace,
-    Update,
-    apply_overrides,
-    dump,
-    dumps,
-    format,
-    load,
-    merge,
-    resolve_lazy,
-)
+from .config import load
+from .expressions import Expression, computed, delete, final, previous, replace, value
+from .formatting import dump, dumps, format
+from .resolver import ConfigError, MissingValueError
 
 __all__ = [
     "load",
-    "apply_overrides",
-    "merge",
-    "resolve_lazy",
-    "Delete",
-    "Replace",
-    "Update",
-    "Lazy",
+    "final",
+    "previous",
+    "value",
+    "computed",
+    "replace",
+    "delete",
+    "Expression",
+    "ConfigError",
+    "MissingValueError",
     "dump",
     "dumps",
     "format",

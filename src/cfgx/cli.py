@@ -4,16 +4,15 @@ import argparse
 import sys
 from typing import Sequence
 
-from .config import dumps as dumps_config
-from .config import format as format_config
+from .formatting import dumps as dumps_config
+from .formatting import format as format_config
 from .config import load
 
 
 def _render(args: argparse.Namespace) -> int:
     cfg = load(
-        args.paths,
-        overrides=args.overrides or None,
-        resolve_lazy=not args.no_resolve_lazy,
+        *args.paths,
+        overrides=args.overrides,
     )
     output = format_config(cfg, format=args.format)
     sys.stdout.write(f"{output}\n")
@@ -21,10 +20,8 @@ def _render(args: argparse.Namespace) -> int:
 
 
 def _dump(args: argparse.Namespace) -> int:
-    cfg = load(args.paths, overrides=args.overrides or None)
-    sys.stdout.write(
-        dumps_config(cfg, format=args.format, sort_keys=args.sort_keys)
-    )
+    cfg = load(*args.paths, overrides=args.overrides)
+    sys.stdout.write(dumps_config(cfg, format=args.format, sort_keys=args.sort_keys))
     return 0
 
 
@@ -39,6 +36,8 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         metavar="OVERRIDE",
         help="Override values such as key=value.",
     )
+
+
 def _add_render_parser(subparsers) -> None:
     parser = subparsers.add_parser(
         "render",
@@ -46,11 +45,6 @@ def _add_render_parser(subparsers) -> None:
         help="Load configs and print the result.",
     )
     _add_common_args(parser)
-    parser.add_argument(
-        "--no-resolve-lazy",
-        action="store_true",
-        help="Print Lazies without resolving them.",
-    )
     parser.add_argument(
         "--format",
         choices=("pretty", "raw", "ruff"),
@@ -82,7 +76,9 @@ def _add_dump_parser(subparsers) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cfgx", description="Config loader utilities.")
+    parser = argparse.ArgumentParser(
+        prog="cfgx", description="Config loader utilities."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_render_parser(subparsers)
     _add_dump_parser(subparsers)
