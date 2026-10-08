@@ -84,6 +84,11 @@ that key. Arbitrary Python functions require `map` or `computed`.
   opaque values can affect sources and other locations. Caching does not promise
   isolation from arbitrary Python effects or an evaluation order for callbacks.
 
+> **Note:** Resolution currently uses Python recursion. Long chains of config
+> layers or overrides can raise `RecursionError`, even for flat dictionaries
+> without expressions or dependency cycles. The threshold depends on the config
+> and Python's recursion limit; there is no fixed supported layer count.
+
 ## Loading and overrides
 
 `load(*sources, overrides=())` expands sources, appends override layers, and
