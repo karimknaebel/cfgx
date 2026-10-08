@@ -105,6 +105,12 @@ class _Node:
             return absent
         return self.resolver.bind(result, (*self.path, key), self.layer, opaque=True)
 
+    def dict_child(self, key):
+        data = self.head().data
+        if isinstance(data, _Container) and data.kind is dict:
+            return self.child(key)
+        return self.resolver.absent
+
     def present(self):
         return self.cached("exists", self._present)
 
@@ -200,16 +206,16 @@ class _DictChild(_Node):
         return self.cached("inherited", self._target)
 
     def _target(self):
-        data = self.parent.head().data
-        if isinstance(data, _Container) and data.kind is dict:
-            return self.parent.child(self.key)
-        return self.resolver.absent
+        return self.parent.dict_child(self.key)
 
     def _head(self):
         return self.target().head()
 
     def _child(self, key):
         return self.target().child(key)
+
+    def dict_child(self, key):
+        return self.target().dict_child(key)
 
     def _presence(self):
         return self.target().presence()
@@ -262,6 +268,14 @@ class _Merge(_Node):
     def _presence(self):
         presence = self.upper.presence()
         return self.lower.presence() if presence is None else presence
+
+    def dict_child(self, key):
+        head = self.upper.head()
+        if head.data is _ABSENT:
+            return self.lower.dict_child(key)
+        if isinstance(head.data, _Container) and head.data.kind is dict:
+            return self.child(key)
+        return self.resolver.absent
 
 
 class _Read(_Node):
@@ -411,60 +425,8 @@ class _Root(_Node):
         return self.target.child(key)
 
 
-class _Patch(_Node):
-    def __init__(self, resolver, path, layer, parent, steps, item):
-        super().__init__(resolver, path, layer)
-        self.parent = parent
-        self.steps = steps
-        self.item = item
-
-    def _head(self):
-        data = self.parent.head().data
-        if _missing(data):
-            if self.item is delete:
-                return _Head(_ABSENT)
-            data = _Container(dict, {})
-        if not isinstance(data, _Container):
-            raise TypeError(
-                f"Cannot override through an opaque object or scalar at {_path(self.path)}"
-            )
-        key, *remaining = self.steps
-        if data.kind is not dict:
-            if type(key) is not int:
-                raise TypeError(
-                    f"Sequence index must be an integer at {_path(self.path)}"
-                )
-            if not -len(data.children) <= key < len(data.children):
-                raise IndexError(
-                    f"Override index out of range at {_path(self.path)}[{key}]"
-                )
-            key %= len(data.children)
-            if not remaining and self.item is delete:
-                raise ConfigError(
-                    f"delete is not allowed in a sequence at {_path(self.path)}[{key}]"
-                )
-        path = (*self.path, key)
-        child = (
-            _Patch(
-                self.resolver,
-                path,
-                self.layer,
-                self.parent.child(key),
-                remaining,
-                self.item,
-            )
-            if remaining
-            else self.resolver.bind(self.item, path, self.layer)
-        )
-        if data.kind is dict:
-            return _Head(_Container(dict, {key: child}))
-        children = list(data.children)
-        children[key] = _Merge(children[key], child) if remaining else child
-        return _Head(_Container(data.kind, children))
-
-
 class Resolver:
-    def __init__(self, sources, overrides):
+    def __init__(self, sources):
         self.cache = {}
         self.active = []
         self.expressions = {}
@@ -473,13 +435,6 @@ class Resolver:
         for layer, source in enumerate(sources):
             self.roots.append(
                 _Merge(self.roots[-1], _Root(self.bind(source, (), layer)))
-            )
-        for steps, item in overrides:
-            layer = len(self.roots) - 1
-            self.roots.append(
-                _Merge(
-                    self.roots[-1], _Patch(self, (), layer, self.roots[-1], steps, item)
-                )
             )
 
     def cached(self, key, fn):

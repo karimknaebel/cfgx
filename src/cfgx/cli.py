@@ -34,7 +34,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         action="extend",
         default=[],
         metavar="OVERRIDE",
-        help="Override values such as key=value.",
+        help="Contribute config layers with path=value, path!=, or expr:layer.",
     )
 
 

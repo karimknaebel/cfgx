@@ -1,17 +1,17 @@
 import pytest
 
-from cfgx import ConfigError, final, load
+from cfgx import ConfigError, computed, delete, final, load, replace
 from cfgx.overrides import parse_path
 
 
 @pytest.mark.parametrize(
     "path, expected",
     [
-        ("a.b[0].c", ("a", "b", 0, "c")),
-        ("a[-1]", ("a", -1)),
+        ("a.b.c", ("a", "b", "c")),
         ('a["literal.key"]', ("a", "literal.key")),
-        ("a[(1, 2)]", ("a", (1, 2))),
-        ("[None].a", (None, "a")),
+        ('["root.key"].a', ("root.key", "a")),
+        ('a["0"]', ("a", "0")),
+        ('a["x[y]"]', ("a", "x[y]")),
     ],
 )
 def test_paths(path, expected):
@@ -29,6 +29,52 @@ def test_invalid_paths(path):
 def test_assignments_replace_leaf_dict_and_preserve_siblings():
     assert load({"a": {"b": {"x": 1}, "c": 2}}, overrides=["a.b={'y': 3}"]) == {
         "a": {"b": {"y": 3}, "c": 2},
+    }
+
+
+@pytest.mark.parametrize("path", ["", "branch."])
+@pytest.mark.parametrize(
+    "overrides", [["x=3", "y=4"], ["y=4", "x=3"], ["x=1", "y=4", "x=3"]]
+)
+def test_computed_container_can_read_override_contributions(path, overrides):
+    calls = []
+    ref = final.branch if path else final
+
+    def produce(get):
+        calls.append(None)
+        return {"answer": get(ref.x) + get(ref.y), "kept": 5}
+
+    source = computed(produce)
+    expected = {"answer": 7, "kept": 5, "x": 3, "y": 4}
+    if path == "branch.":
+        source, expected = {"branch": source}, {"branch": expected}
+    assert load(source, overrides=[path + item for item in overrides]) == expected
+    assert calls == [None]
+
+
+def test_computed_root_can_read_expression_override():
+    assert load(
+        computed(lambda get: {"answer": get(final.y)}),
+        overrides=["y=expr:final.x * 2", "x=3"],
+    ) == {"answer": 6, "y": 6, "x": 3}
+
+
+def test_overrides_preserve_real_dependency_cycles():
+    with pytest.raises(ConfigError, match="Dependency cycle"):
+        load(
+            computed(lambda get: {"answer": get(final.x)}),
+            overrides=["x=expr:final.answer"],
+        )
+
+
+@pytest.mark.parametrize("result", [0, [], ()])
+def test_dictionary_override_replaces_computed_non_dictionary_ancestor(result):
+    def produce(get):
+        assert get(final.branch.x) == 3
+        return result
+
+    assert load({"branch": computed(produce)}, overrides=["branch.x=3"]) == {
+        "branch": {"x": 3}
     }
 
 
@@ -65,14 +111,11 @@ def test_overrides_do_not_split_operators_inside_values_or_quoted_keys():
     }
 
 
-def test_sequence_edits_preserve_unresolved_sibling_definitions():
-    assert load(
-        {"items": [{"x": 1, "y": final.items[0].x * 2}, {"x": 3}]},
-        overrides=["items[0].x=4"],
-    ) == {"items": [{"x": 4, "y": 8}, {"x": 3}]}
-    assert load({"items": (1, 2)}, overrides=["items[-1]=expr:value * 3"]) == {
-        "items": (1, 6)
-    }
+@pytest.mark.parametrize("key", ["0", "-1", "None", "True", "(1, 2)"])
+@pytest.mark.parametrize("operation", ["=3", "!="])
+def test_non_string_override_paths_rejected(key, operation):
+    with pytest.raises(ValueError, match="string dictionary keys"):
+        load(overrides=[f"items[{key}]{operation}"])
 
 
 def test_create_missing_dictionary_ancestors():
@@ -83,30 +126,110 @@ def test_deletion_and_computed_deletion():
     assert load({"a": {"b": 1, "c": 2}}, overrides=["a.b!=", "a.c=expr:delete"]) == {
         "a": {}
     }
-    assert load(overrides=["missing.deep!="]) == {}
 
 
-@pytest.mark.parametrize("override", ["x[0]!=", "x[0]=expr:delete"])
+@pytest.mark.parametrize(
+    "override",
+    [
+        "a.b.c!=",
+        "a.b.c=expr:delete",
+        "a.b.c=expr:computed(lambda get: delete)",
+    ],
+)
+def test_deletion_establishes_dictionary_ancestors(override):
+    assert load(overrides=[override]) == {"a": {"b": {}}}
+    assert load({"a": {"keep": 1}}, overrides=[override]) == {"a": {"keep": 1, "b": {}}}
+
+
+def test_deletion_does_not_evaluate_the_inherited_leaf():
+    assert load(
+        {
+            "a": {
+                "b": computed(lambda get: 1 / 0),
+                "kept": final.a.b.exists(),
+            }
+        },
+        overrides=["a.b!="],
+    ) == {"a": {"kept": False}}
+
+
+@pytest.mark.parametrize("override", ["x=expr:[delete]", "expr:{'x': (delete,)}"])
 def test_sequence_deletion_rejected(override):
     with pytest.raises(ConfigError, match="sequence"):
-        load({"x": [1]}, overrides=[override])
+        load(overrides=[override])
 
 
-@pytest.mark.parametrize("override", ["x[2]=3", "x[-3]=3"])
-def test_sequence_override_bounds(override):
-    with pytest.raises(IndexError):
-        load({"x": [1, 2]}, overrides=[override])
+@pytest.mark.parametrize("ancestor", [1, None, [1, 2], (1, 2)])
+def test_dictionary_override_replaces_non_dictionary_ancestor(ancestor):
+    assert load({"x": ancestor}, overrides=["x.y=2"]) == {"x": {"y": 2}}
 
 
-def test_scalar_ancestor_rejected():
-    with pytest.raises(TypeError, match="scalar"):
-        load({"x": 1}, overrides=["x.y=2"])
+@pytest.mark.parametrize(
+    "override, layer",
+    [
+        ("a.b={'new': 3}", {"a": {"b": replace({"new": 3})}}),
+        ("a.b!=", {"a": {"b": delete}}),
+        ("a.b=expr:delete", {"a": {"b": replace(delete)}}),
+    ],
+)
+def test_shorthand_matches_ordinary_contributions(override, layer):
+    source = {"a": {"b": {"old": 1}, "keep": 2}}
+    assert load(source, overrides=[override]) == load(source, layer)
+
+
+def test_whole_layer_expressions_merge_and_preserve_layer_boundaries():
+    assert load(
+        {"x": 1, "options": {"a": 1}},
+        overrides=[
+            "expr:dict(x=value + 1, before=previous.x)",
+            "x=expr:value * 3",
+            "expr:{'options': {'b': final.x}}",
+        ],
+    ) == {"x": 6, "before": 1, "options": {"a": 1, "b": 6}}
+
+
+def test_whole_layer_expressions_support_non_string_keys():
+    assert load(
+        {"options": {0: {"a": 1}, (1, 2): 3}},
+        overrides=["expr:{'options': {0: {'b': 2}, (1, 2): delete, None: True}}"],
+    ) == {"options": {0: {"a": 1, "b": 2}, None: True}}
+
+
+def test_computed_whole_layer_can_read_later_override():
+    assert load(
+        {"kept": 1},
+        overrides=["expr:computed(lambda get: {'answer': get(final.x)})", "x=3"],
+    ) == {"kept": 1, "answer": 3, "x": 3}
+
+
+@pytest.mark.parametrize("expression", ["[]", "()", "1", "None", "delete", "'cfg.py'"])
+def test_invalid_whole_layer_value(expression):
+    with pytest.raises(TypeError, match="whole-layer expression"):
+        load(overrides=[f"expr:{expression}"])
+
+
+def test_invalid_computed_whole_layer_value():
+    with pytest.raises(ConfigError, match="plain dict"):
+        load(overrides=["expr:computed(lambda get: [])"])
 
 
 def test_list_transform_with_map():
     assert load({"tags": ["a"]}, overrides=["tags=expr:value.map('x + [\"b\"]')"]) == {
         "tags": ["a", "b"],
     }
+
+
+def test_sequence_transform_preserves_untouched_elements_and_source():
+    source = {"items": [{"width": 64, "keep": 1}, {"width": 32}]}
+    assert load(
+        source,
+        overrides=['items=expr:value.map(lambda x: [{**x[0], "width": 128}, *x[1:]])'],
+    ) == {"items": [{"width": 128, "keep": 1}, {"width": 32}]}
+    assert source == {"items": [{"width": 64, "keep": 1}, {"width": 32}]}
+    assert load(
+        {"items": (1, 2)},
+        overrides=["items=expr:value.map(lambda x: (*x[:-1], x[-1] * 3))"],
+    ) == {"items": (1, 6)}
 
 
 @pytest.mark.parametrize("override", ["x!=3", "x+=3", "x-=3", "x"])

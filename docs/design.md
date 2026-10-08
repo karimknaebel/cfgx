@@ -91,17 +91,24 @@ resolves once. There is no separate public merge or unresolved-config API.
 Reloading sources recomputes expressions. Loading a resolved snapshot cannot
 recover its original formulas. Formatting and snapshot helpers remain available.
 
-- `foo.bar=baz` contributes a replacement at the target leaf, equivalent for
-  dictionary paths to `{'foo': {'bar': replace('baz')}}`.
-- `foo.bar!=` contributes `delete` at that leaf.
+- `foo.bar=baz` contributes `{'foo': {'bar': replace('baz')}}`.
+- `foo.bar!=` contributes `{'foo': {'bar': delete}}`. Declared ancestors remain
+  present, including when newly introduced. The same applies to `expr:delete`
+  and computed deletions.
 - Values use Python literal parsing with unquoted-string fallback. `expr:`
   evaluates Python with `final`, `previous`, `value`, `computed`, `replace`,
   `delete`, `math`, and ordinary builtins. It is trusted Python, like config files.
-- Each override is a separate layer; `value` refers to the target before it.
-- Missing dictionary ancestors may be created. Writes through scalars or opaque
-  objects are rejected. Existing list/tuple elements can be addressed and the
-  surrounding sequence is rebuilt. Sequence indices must exist; deletion of an
-  element errors. Sequence editing can be expressed through `value.map(...)`.
+- An argument starting with `expr:` contributes a whole layer, which must be a
+  plain dictionary or an expression producing one. It uses ordinary dictionary
+  merging and can contain arbitrary keys.
+- Each override is a separate layer; `value` and `previous` use the same origins
+  as definitions in config files.
+- Shorthand paths select string dictionary keys using dots or quoted subscripts.
+  Non-string subscripts, including sequence indices, are rejected. Whole-layer
+  expressions support non-string keys; sequence transformations use `value.map`.
+- All overrides become ordinary contributions before resolution. Missing
+  dictionary ancestors are created; scalar, sequence, or opaque ancestors are
+  replaced by the contributed dictionary. Opaque values are not mutated.
 - Only assignment and deletion are override operators. List transformations use
   `expr:` rather than separate append/remove syntax.
 

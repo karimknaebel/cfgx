@@ -44,6 +44,10 @@ assert cfg["steps"] == 48_000
 assert cfg["backbone_lr"] == cfg["lr"] * 0.1
 ```
 
+Overrides contribute ordinary layers: `optimizer.lr=1e-4` adds
+`{"optimizer": {"lr": replace(1e-4)}}`, and `optimizer.decay!=` adds
+`{"optimizer": {"decay": delete}}`. Use `expr:{...}` for a complete layer.
+
 Dictionaries merge recursively, including computed dictionaries. Lists and tuples
 replace earlier sequences. Use `replace(x)` to replace a dictionary and `delete`
 to remove a dictionary entry.

@@ -58,6 +58,10 @@ Later layers can patch a replacement. An intervening scalar, sequence, opaque
 object, or deletion breaks dictionary inheritance from earlier layers.
 `replace(delete)` still deletes: replacement does not quote merge instructions.
 
+Deletion affects only its own entry. A declared dictionary remains present even
+when all its children are deleted: `load({"a": {"b": delete}})` produces
+`{"a": {}}`. Literal and computed deletions follow the same rule.
+
 Computed dictionaries participate in the same merging:
 
 ```python

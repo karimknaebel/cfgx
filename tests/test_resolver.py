@@ -29,6 +29,26 @@ def test_computed_dictionary_merges_with_earlier_dictionary():
     }
 
 
+def test_computed_root_reads_final_key_through_intermediate_layers():
+    assert load(
+        computed(lambda get: {"answer": get(final.x) + get(final.y)}),
+        {"x": 3},
+        {"y": 4},
+    ) == {"answer": 7, "x": 3, "y": 4}
+
+
+def test_computed_dictionary_reads_final_key_through_intermediate_layers():
+    assert load(
+        {"branch": computed(lambda get: {"answer": get(final.branch.x)})},
+        {"branch": {"x": 3}},
+        {"branch": {"y": 4}},
+    ) == {"branch": {"answer": 3, "x": 3, "y": 4}}
+
+
+def test_dictionary_keys_do_not_inherit_from_sequence_indices():
+    assert load({"a": [{"old": 1}]}, {"a": {0: {"new": 2}}}) == {"a": {0: {"new": 2}}}
+
+
 @pytest.mark.parametrize("barrier", [0, [], (), delete, replace({})])
 def test_non_mapping_contribution_breaks_inheritance(barrier):
     assert load({"x": {"a": 1}}, {"x": barrier}, {"x": {"b": 2}}) == {"x": {"b": 2}}

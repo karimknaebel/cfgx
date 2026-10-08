@@ -21,12 +21,13 @@ def load(*sources, overrides=()):
 
     Exact built-in dictionaries, lists, and tuples are structurally copied.
     Other objects are opaque and retain identity. No source container is mutated.
-    Overrides accept ``path=value``, ``path!=``, and Python ``expr:`` values.
+    Overrides contribute ordinary layers using ``path=value``, ``path!=``, or
+    ``expr:layer``. Paths select string dictionary keys. Assignment replaces its
+    leaf; dictionary ancestors merge normally. Values can use Python ``expr:``.
     """
-    return Resolver(
-        list(_expand(sources, Path.cwd())),
-        [parse_override(item) for item in overrides],
-    ).resolve()
+    layers = list(_expand(sources, Path.cwd()))
+    layers.extend(parse_override(item) for item in overrides)
+    return Resolver(layers).resolve()
 
 
 def _expand(source, directory, stack=()):

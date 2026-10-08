@@ -1,13 +1,13 @@
-"""CLI assignments as ordered contributions to the resolver."""
+"""Translate CLI shorthand into ordinary config layers."""
 
 import ast
 import re
 
-from .expressions import delete, namespace, replace
+from .expressions import Expression, delete, namespace, replace
 
 
 def parse_path(text):
-    """Parse dotted keys and Python literal subscripts without executing code."""
+    """Parse dotted dictionary keys and quoted string subscripts."""
     keys = []
     pos = 0
     while pos < len(text):
@@ -34,7 +34,11 @@ def parse_path(text):
             if depth:
                 raise ValueError(f"Unclosed subscript in override path: {text}")
             key = ast.literal_eval(text[start + 1 : pos - 1])
-            hash(key)
+            if not isinstance(key, str):
+                raise ValueError(
+                    "Override paths require string dictionary keys; use expr: "
+                    "for non-string keys or sequence transformations"
+                )
             keys.append(key)
         else:
             match = re.match(r"[^.\[\]\s]+", text[pos:])
@@ -54,6 +58,13 @@ def parse_path(text):
 
 
 def parse_override(text):
+    if text.startswith("expr:"):
+        layer = _parse_value(text)
+        if type(layer) is not dict and not isinstance(layer, Expression):
+            raise TypeError(
+                "A whole-layer expression must produce a plain dict or cfgx expression"
+            )
+        return layer
     quote = None
     depth = 0
     escaped = False
@@ -76,13 +87,18 @@ def parse_override(text):
             if path.endswith("!"):
                 if raw:
                     raise ValueError("Delete overrides must not include a value")
-                return parse_path(path[:-1]), delete
-            if path.endswith(("+", "-")):
+                path = path[:-1]
+                item = delete
+            elif path.endswith(("+", "-")):
                 raise ValueError(
                     "Use path=expr:value.map(...) for sequence transformations"
                 )
-            return parse_path(path), replace(_parse_value(raw))
-    raise ValueError(f"Override must use path=value or path!=: {text}")
+            else:
+                item = replace(_parse_value(raw))
+            for key in reversed(parse_path(path)):
+                item = {key: item}
+            return item
+    raise ValueError(f"Override must use path=value, path!=, or expr:layer: {text}")
 
 
 def _parse_value(text):

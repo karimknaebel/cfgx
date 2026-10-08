@@ -106,11 +106,10 @@ def test_explicit_opaque_reads_and_copied_supported_results():
     assert mapping["x"] == [3]
 
 
-def test_dict_contribution_can_replace_opaque_but_override_cannot_write_through_it():
+def test_dictionary_contributions_and_overrides_replace_opaque_without_mutating_it():
     mapping = UserDict({"x": 1})
     assert load({"a": mapping}, {"a": {"y": 2}}) == {"a": {"y": 2}}
-    with pytest.raises(TypeError, match="opaque"):
-        load({"a": mapping}, overrides=["a.x=2"])
+    assert load({"a": mapping}, overrides=["a.y=2"]) == {"a": {"y": 2}}
     assert mapping == {"x": 1}
 
 

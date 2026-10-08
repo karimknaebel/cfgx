@@ -45,6 +45,28 @@ def test_render_computed_override(capsys, tmp_path):
     assert capsys.readouterr().out == "{'a': 6, 'b': 12}\n"
 
 
+def test_render_whole_layer_and_deletion_overrides(capsys, tmp_path):
+    cfg_path = tmp_path / "cfg.py"
+    cfg_path.write_text("config = {'a': 2, 'nested': {'kept': 1}}\n")
+    assert (
+        main(
+            [
+                "render",
+                str(cfg_path),
+                "-o",
+                "expr:{'nested': {'derived': final.a * 2}}",
+                "missing.deep!=",
+                "-o",
+                "a=expr:value * 3",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == (
+        "{'a': 6, 'nested': {'kept': 1, 'derived': 12}, 'missing': {}}\n"
+    )
+
+
 def test_render_raw(capsys, tmp_path):
     cfg_path = tmp_path / "cfg.py"
     cfg_path.write_text("config = {'a': 1}\n")
