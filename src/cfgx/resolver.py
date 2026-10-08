@@ -108,7 +108,7 @@ class _Node:
     def dict_child(self, key):
         data = self.head().data
         if isinstance(data, _Container) and data.kind is dict:
-            return self.child(key)
+            return data.children.get(key, self.resolver.absent)
         return self.resolver.absent
 
     def present(self):
@@ -242,11 +242,9 @@ class _Merge(_Node):
         ):
             return head
         lower = self.lower.head().data
-        keys = (
-            dict.fromkeys(lower.children)
-            if isinstance(lower, _Container) and lower.kind is dict
-            else {}
-        )
+        if not isinstance(lower, _Container) or lower.kind is not dict:
+            return head
+        keys = dict.fromkeys(lower.children)
         keys.update(dict.fromkeys(head.data.children))
         return _Head(_Container(dict, {key: self.child(key) for key in keys}))
 
@@ -273,6 +271,8 @@ class _Merge(_Node):
         head = self.upper.head()
         if head.data is _ABSENT:
             return self.lower.dict_child(key)
+        if head.replace:
+            return self.upper.dict_child(key)
         if isinstance(head.data, _Container) and head.data.kind is dict:
             return self.child(key)
         return self.resolver.absent
@@ -307,6 +307,14 @@ class _Read(_Node):
 
     def _child(self, key):
         return _Read(self.target.child(key))
+
+    def _materialize(self):
+        result = self.target.materialize()
+        if _missing(result):
+            if self.entry:
+                return _ABSENT
+            raise MissingValueError(f"Missing config value at {_path(self.path)}")
+        return result
 
     def _presence(self):
         present = self.target.present()

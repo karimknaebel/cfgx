@@ -27,6 +27,14 @@ def test_repeated_sequence_items_are_independent():
     assert shared == {"x": []}
 
 
+def test_repeated_and_transitive_references_are_independent():
+    result = load(
+        {"source": {"items": []}, "a": final.source, "b": final.source, "c": final.a}
+    )
+    result["a"]["items"].append(1)
+    assert result["source"] == result["b"] == result["c"] == {"items": []}
+
+
 def test_reusing_sources_recomputes_without_mutation():
     source = {"x": 2, "items": [final.x]}
     assert load(source, overrides=["x=3"])["items"] == [3]

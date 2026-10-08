@@ -287,6 +287,24 @@ def test_reference_consumes_source_deletions_instead_of_replaying_them():
     }
 
 
+@pytest.mark.parametrize("removed", [delete, computed(lambda get: delete)])
+def test_referenced_replacement_can_be_patched_after_deletion(removed):
+    assert load(
+        {"src": {"gone": removed}, "dst": {"old": 2}},
+        {"dst": replace(final.src)},
+        {"dst": {"kept": 1}},
+    ) == {"src": {}, "dst": {"kept": 1}}
+
+
+def test_patched_reference_still_errors_on_explicit_missing_lookup():
+    with pytest.raises(MissingValueError, match="gone"):
+        load(
+            {"src": {"gone": delete}},
+            {"dst": replace(final.src)},
+            {"dst": {"kept": final.dst.gone}},
+        )
+
+
 def test_producer_runs_once_for_keys_presence_length_and_values():
     calls = []
 
@@ -334,11 +352,20 @@ def test_computation_cache_distinguishes_layers_and_locations():
         {"a": final.b, "b": final.a},
         {"a": final(0)},
         {"a": computed(lambda get: get(final))},
+        {"a": {"b": final.a}},
+        {"a": [final.a]},
+        {"a": (final.a,)},
+        {"a": {"b": final.c}, "c": {"d": final.a}},
+        {"a": computed(lambda get: {"b": final.a})},
     ],
 )
 def test_dependency_cycles_have_trace(source):
     with pytest.raises(ConfigError, match=r"Dependency cycle:.*layer.*->"):
         load(source)
+
+
+def test_patch_can_break_a_container_reference_cycle():
+    assert load({"a": {"b": final.a}}, {"a": {"b": {"b": delete}}}) == {"a": {"b": {}}}
 
 
 def test_previous_can_cycle_through_final():
