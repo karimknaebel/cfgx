@@ -1,10 +1,22 @@
 from .config import load
-from .expressions import Expression, computed, delete, final, previous, replace, value
+from .expressions import (
+    Expression,
+    compose,
+    computed,
+    delete,
+    final,
+    include,
+    previous,
+    replace,
+    value,
+)
 from .formatting import dump, dumps, format
 from .resolver import ConfigError, MissingValueError
 
 __all__ = [
     "load",
+    "compose",
+    "include",
     "final",
     "previous",
     "value",

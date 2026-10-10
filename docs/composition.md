@@ -2,8 +2,11 @@
 
 ## Sources and layers
 
-A source is a path, a plain dictionary, an expression producing a dictionary, or
-a tuple of sources. Every file defines `config` with the same syntax.
+A source is a path, a plain dictionary, an expression producing a dictionary, an
+explicit `include` or `compose` declaration, a dictionary-valued replacement,
+or a tuple of sources. Every file defines `config` with the same syntax. The
+[mental model](model.md) describes source positions, value positions, and the
+shorthand available in each.
 
 ```python
 config = {"lr": 3e-4}
@@ -26,15 +29,40 @@ config = (
 )
 ```
 
-`load` accepts the same sources as positional arguments or nested tuples. Empty
-composition is `()` or `{}`. Lists are not accepted as source collections.
-Strings, lists, and tuples inside a dictionary are data, not source directives.
-Computed contributions produce data, not further includes.
+`load` accepts the same sources as positional arguments or nested tuples. A
+source tuple is shorthand for `compose(...)`; a source path is shorthand for
+`include(...)`. Empty composition is `compose()`, `()`, or `{}`. Lists are not
+accepted as source collections. Strings and tuples in value positions remain
+data. Expressions can return explicit includes or compositions, but their string
+and tuple results remain data.
 
 Each contribution is a layer. Files and nested tuples simply expand in place;
 referenced files are not resolved or merged independently. Relative includes use
 the including file's directory. Repeated includes apply repeatedly. Include
 cycles report their path chain. The root must be a plain dictionary.
+
+## Nested composition and inclusion
+
+Use explicit declarations to contribute dictionaries inside another config:
+
+```python
+from cfgx import compose, include, value
+
+config = "base.py", {
+    "model": include("model.py"),
+    "optimizer": compose("optimizer.py", {"lr": value * 0.1}),
+}
+```
+
+Includes contribute unresolved definitions at their insertion location. They
+merge normally and remain patchable by later layers. Use relative references
+such as `final(1).width` in reusable fragments; `final.width` always selects the
+whole config's root field. `include` also works in list and tuple elements.
+
+Within a nested composition, `previous` starts with the config before the
+enclosing layer and incorporates preceding local contributions. Surrounding
+fields retain the enclosing layer's original previous view. See
+[local layers and inherited values](model.md#local-layers-and-inherited-values).
 
 ## Merge behavior
 

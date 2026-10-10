@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
-from .expressions import Expression, _Replacement, delete
+from .expressions import Expression, _Composition, _Include, _Replacement, delete
 
 _ABSENT = object()
 
@@ -61,6 +62,14 @@ class _Missing:
     path: tuple
 
 
+@dataclass
+class _Layer:
+    previous: _Node
+    directory: Path
+    stack: tuple
+    containers: dict
+
+
 class _Node:
     def __init__(self, resolver, path, layer):
         self.resolver = resolver
@@ -72,6 +81,9 @@ class _Node:
 
     def head(self):
         return self.cached("structure", self._head)
+
+    def contributions(self):
+        return None
 
     def child(self, key):
         if isinstance(key, slice):
@@ -164,6 +176,8 @@ class _Node:
         result = []
         for index, child in enumerate(data.children):
             item = child.materialize()
+            if item is _ABSENT:
+                raise MissingValueError(f"Missing config value at {_path(child.path)}")
             if _missing(item):
                 raise ConfigError(
                     f"delete is not allowed in a sequence at {_path(self.path)}[{index}]"
@@ -195,18 +209,28 @@ class _Replace(_Node):
     def _presence(self):
         return self.target.presence()
 
+    def contributions(self):
+        sources = self.target.contributions()
+        return None if sources is None else (_Replace(sources[0]), *sources[1:])
 
-class _DictChild(_Node):
-    def __init__(self, parent, key):
+
+class _Inherited(_Node):
+    def __init__(self, parent, key, kind=dict):
         super().__init__(parent.resolver, (*parent.path, key), parent.layer)
         self.parent = parent
         self.key = key
+        self.kind = kind
 
     def target(self):
         return self.cached("inherited", self._target)
 
     def _target(self):
-        return self.parent.dict_child(self.key)
+        if self.kind is dict:
+            return self.parent.dict_child(self.key)
+        data = self.parent.head().data
+        if isinstance(data, _Container) and data.kind in (list, tuple):
+            return self.parent.child(self.key)
+        return self.resolver.absent
 
     def _head(self):
         return self.target().head()
@@ -231,7 +255,22 @@ class _Merge(_Node):
         self.lower = lower
         self.upper = upper
 
+    def expanded(self):
+        return self.cached("composition", self._expanded)
+
+    def _expanded(self):
+        sources = self.upper.contributions()
+        if sources is None:
+            return None
+        result = self.lower
+        for source in sources:
+            result = _Merge(result, source)
+        return result
+
     def _head(self):
+        expanded = self.expanded()
+        if expanded is not None:
+            return expanded.head()
         head = self.upper.head()
         if head.data is _ABSENT:
             return self.lower.head()
@@ -241,14 +280,20 @@ class _Merge(_Node):
             or head.data.kind is not dict
         ):
             return head
-        lower = self.lower.head().data
-        if not isinstance(lower, _Container) or lower.kind is not dict:
-            return head
-        keys = dict.fromkeys(lower.children)
+        lower = self.lower.head()
+        if not isinstance(lower.data, _Container) or lower.data.kind is not dict:
+            return _Head(head.data, replace=lower.data is not _ABSENT)
+        keys = dict.fromkeys(lower.data.children)
         keys.update(dict.fromkeys(head.data.children))
-        return _Head(_Container(dict, {key: self.child(key) for key in keys}))
+        return _Head(
+            _Container(dict, {key: self.child(key) for key in keys}),
+            replace=lower.replace,
+        )
 
     def _child(self, key):
+        expanded = self.expanded()
+        if expanded is not None:
+            return expanded.child(key)
         head = self.upper.head()
         if head.data is _ABSENT:
             return self.lower.child(key)
@@ -259,7 +304,7 @@ class _Merge(_Node):
         ):
             return self.upper.child(key)
         return _Merge(
-            _DictChild(self.lower, key),
+            _Inherited(self.lower, key),
             head.data.children.get(key, self.resolver.absent),
         )
 
@@ -268,6 +313,9 @@ class _Merge(_Node):
         return self.lower.presence() if presence is None else presence
 
     def dict_child(self, key):
+        expanded = self.expanded()
+        if expanded is not None:
+            return expanded.dict_child(key)
         head = self.upper.head()
         if head.data is _ABSENT:
             return self.lower.dict_child(key)
@@ -276,6 +324,78 @@ class _Merge(_Node):
         if isinstance(head.data, _Container) and head.data.kind is dict:
             return self.child(key)
         return self.resolver.absent
+
+
+class _Composed(_Node):
+    def __init__(self, sources):
+        super().__init__(sources[-1].resolver, sources[-1].path, sources[-1].layer)
+        self.sources = sources
+        self.target = self.resolver.absent
+        for source in sources:
+            self.target = _Merge(self.target, source)
+
+    def contributions(self):
+        return self.sources
+
+    def _head(self):
+        return self.target.head()
+
+    def _child(self, key):
+        return self.target.child(key)
+
+    def _presence(self):
+        return self.target.presence()
+
+    def dict_child(self, key):
+        return self.target.dict_child(key)
+
+
+class _Scope(_Node):
+    """Apply preceding local contributions to the enclosing previous view."""
+
+    def __init__(self, previous, path, contribution, kinds):
+        super().__init__(previous.resolver, previous.path, contribution.layer)
+        self.previous = previous
+        self.key = path[0]
+        self.kind = kinds[0]
+        inherited = _Inherited(previous, self.key, self.kind)
+        self.target = (
+            _Scope(inherited, path[1:], contribution, kinds[1:])
+            if len(path) > 1
+            else _Merge(inherited, contribution)
+        )
+
+    def _head(self):
+        data = self.previous.head().data
+        if self.kind is dict:
+            children = (
+                dict(data.children)
+                if isinstance(data, _Container) and data.kind is dict
+                else {}
+            )
+            children[self.key] = self.target
+            return _Head(_Container(dict, children))
+        if isinstance(data, _Container) and data.kind in (list, tuple):
+            kind, children = data.kind, list(data.children)
+        else:
+            kind, children = self.kind, []
+        children.extend(
+            _Literal(self.resolver, (*self.path, index), self.layer, _ABSENT)
+            for index in range(len(children), self.key + 1)
+        )
+        children[self.key] = self.target
+        return _Head(_Container(kind, children))
+
+    def _child(self, key):
+        return self.target if key == self.key else super()._child(key)
+
+    def dict_child(self, key):
+        if self.kind is not dict:
+            return self.resolver.absent
+        return self.target if key == self.key else self.previous.dict_child(key)
+
+    def _presence(self):
+        return True
 
 
 class _Read(_Node):
@@ -335,6 +455,9 @@ class _Evaluation(_Node):
     def _child(self, key):
         return self.target().child(key)
 
+    def contributions(self):
+        return self.cached("contributions", lambda: self.target().contributions())
+
     def _presence(self):
         if self.expression._op in ("keys", "len", "exists"):
             return True
@@ -362,7 +485,11 @@ class _Evaluation(_Node):
                     f"Reference goes above the root at {_path(self.path)}"
                 )
             path = () if parent is None else self.path[: len(self.path) - parent]
-            node = self.resolver.roots[-1 if view == "final" else self.layer]
+            node = (
+                self.resolver.final
+                if view == "final"
+                else self.resolver.layers[self.layer].previous
+            )
             for key in path:
                 node = node.child(key)
             return _Read(node)
@@ -414,17 +541,21 @@ class _Definition(_Node):
             return True
         return not _missing(self.head().data)
 
+    def contributions(self):
+        return self.target.contributions()
 
-class _Root(_Node):
+
+class _Contribution(_Node):
     def __init__(self, target):
-        super().__init__(target.resolver, (), target.layer)
+        super().__init__(target.resolver, target.path, target.layer)
         self.target = target
 
     def _head(self):
         head = self.target.head()
         if not isinstance(head.data, _Container) or head.data.kind is not dict:
             raise ConfigError(
-                f"Root contribution in layer {self.layer + 1} must produce a plain dict"
+                f"Contribution at {_path(self.path)} in layer {self.layer + 1} "
+                "must produce a plain dict"
             )
         return head
 
@@ -432,18 +563,54 @@ class _Root(_Node):
         self.head()
         return self.target.child(key)
 
+    def contributions(self):
+        return self.target.contributions()
+
 
 class Resolver:
-    def __init__(self, sources):
+    def __init__(self, sources, expand):
         self.cache = {}
         self.active = []
         self.expressions = {}
+        self.layers = []
+        self.expand = expand
         self.absent = _Literal(self, (), -1, _ABSENT)
-        self.roots = [self.bind({}, (), -1)]
-        for layer, source in enumerate(sources):
-            self.roots.append(
-                _Merge(self.roots[-1], _Root(self.bind(source, (), layer)))
+        self.final = _Literal(self, (), -1, _Container(dict, {}))
+        for source in sources:
+            self.final = _Merge(
+                self.final, self.contribution(source, (), self.final, {})
             )
+
+    def contribution(self, source, path, previous, containers, ancestors=()):
+        layer = len(self.layers)
+        self.layers.append(_Layer(previous, source.directory, source.stack, containers))
+        return _Contribution(self.bind(source.value, path, layer, ancestors))
+
+    def compose(self, sources, path, layer, ancestors):
+        context = self.layers[layer]
+        contributions = []
+        previous = context.previous
+        kinds = tuple(context.containers[path[:i]] for i in range(len(path)))
+        for source in self.expand(sources, context.directory, context.stack):
+            if contributions:
+                result = _Composed(tuple(contributions))
+                previous = (
+                    _Scope(context.previous, path, result, kinds)
+                    if path
+                    else _Merge(context.previous, result)
+                )
+            contributions.append(
+                self.contribution(
+                    source,
+                    path,
+                    previous,
+                    {path[:i]: kind for i, kind in enumerate(kinds)},
+                    ancestors,
+                )
+            )
+        if not contributions:
+            return _Literal(self, path, layer, _Container(dict, {}))
+        return _Composed(tuple(contributions))
 
     def cached(self, key, fn):
         if key in self.cache:
@@ -476,10 +643,13 @@ class Resolver:
             return _Definition(self.expression(x, path, layer))
         if not opaque and isinstance(x, _Replacement):
             return _Replace(self.bind(x.value, path, layer, ancestors))
+        if not opaque and isinstance(x, (_Composition, _Include)):
+            return self.compose(x, path, layer, ancestors)
         if type(x) in (dict, list, tuple):
             if id(x) in ancestors:
                 raise ConfigError(f"Cyclic Python container at {_path(path)}")
             ancestors = (*ancestors, id(x))
+            self.layers[layer].containers[path] = type(x)
             if type(x) is dict:
                 children = {
                     k: self.bind(v, (*path, k), layer, ancestors, opaque)
@@ -506,4 +676,4 @@ class Resolver:
         return _copy(result)
 
     def resolve(self):
-        return self.read(self.roots[-1])
+        return self.read(self.final)

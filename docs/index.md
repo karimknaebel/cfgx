@@ -39,6 +39,10 @@ config = (
 A dictionary alone is shorthand for a one-element tuple. Tuples compose sources;
 inside the config, tuples and lists are ordinary sequence data. Dictionaries
 merge recursively, and file references are relative to the declaring file.
+Use `include("model.py")` to insert a file's definitions at a nested location,
+or `compose("defaults.py", {...})` to compose sources there. See the
+[mental model](model.md) for what accepts sources, what accepts values, and
+which forms are implicit.
 
 ## Load and override
 

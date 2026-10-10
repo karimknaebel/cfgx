@@ -16,6 +16,9 @@ config = {
 before the expression's originating layer. `value` is `previous(0)`: the inherited
 value at the expression's output location. Earlier definitions keep their own
 origins, and their `final` references still see the complete composition.
+Inside a nested `compose`, `previous` also includes preceding local contributions
+at that location. Surrounding sibling fields retain their enclosing layer's
+previous view; see [the mental model](model.md#local-layers-and-inherited-values).
 
 Attributes select dictionary keys. Subscripts support arbitrary hashable keys
 and sequence indices; `final[("a", "b")]` selects a tuple key, not two path parts.
@@ -78,8 +81,10 @@ config = {
 `get` takes any expression and returns its fully resolved value, with supported
 containers structurally copied. Only reads actually executed create dependencies.
 `get(final.lr.map("x * 2"))` is valid. A callback may return nested expressions,
-`replace`, or `delete`. New declarations bind at their output locations, within
-the same originating layer.
+`replace`, `delete`, `include`, or `compose`. Returned values bind at their output
+locations within the same originating layer; explicit compositions introduce
+ordered local layers. Includes returned by a callback resolve paths relative to
+the expression's declaring file. Returned strings and tuples remain data.
 
 Unresolved expressions have no Python truth value and cannot be iterated.
 Use `get` inside `computed` for `if`, `and`, `or`, comprehensions, and functions

@@ -5,12 +5,21 @@ This document specifies the new implementation. Configs are ordered definitions;
 
 ## Sources and layers
 
-- A source is a file path, a plain dictionary, an expression producing a plain
-  dictionary, or a tuple of sources. Tuples flatten recursively, in order.
-- `config = {...}` is shorthand for `config = ({...},)`. Source lists are invalid;
-  lists inside dictionaries are ordinary data.
+- Source positions are a file's exported `config` and arguments to `load` and
+  `compose`. They accept plain dictionaries, expressions producing dictionaries,
+  explicit `include` and `compose` declarations, and dictionary-valued `replace`.
+- Source paths are implicit includes; source tuples are implicit compositions
+  that flatten recursively in order. `config = {...}` is equivalent to
+  `config = compose({...})`. Source lists are invalid.
+- Dictionary values and list/tuple elements are value positions: strings, paths,
+  and tuples remain data. Explicit includes and compositions contribute
+  dictionary definitions at their insertion locations.
 - Each contribution is a layer. Files add no boundary. Includes are relative to
   the including file and repeated includes apply again. Include cycles error.
+- Nested compositions have local layers. Their previous views contain the
+  enclosing layer's earlier config with preceding local contributions applied
+  at the composition's location. Surrounding siblings retain the enclosing
+  layer's previous view. Dictionary traversal order does not create layers.
 - Dictionaries merge recursively. Scalars, opaque objects, lists, and tuples
   replace earlier values. A scalar or deletion between dictionary contributions
   breaks inheritance from the earlier dictionary.
@@ -20,16 +29,24 @@ This document specifies the new implementation. Configs are ordered definitions;
 - `replace(x)` discards inherited merging at its location. Later layers can
   still patch its result. `delete` removes a dictionary entry. Deletion at the
   root or in a list/tuple is invalid.
-- Computations can return dictionaries, expressions, `replace`, and `delete`.
-  Returned declarations retain the producer's layer and bind at their output
-  locations. They do not create new layers.
-- All root contributions must produce plain dictionaries.
+- Computations can return dictionaries, expressions, `replace`, `delete`,
+  `include`, and `compose`. Returned values retain the producer's layer and bind
+  at their output locations. Explicit includes and compositions introduce local
+  contributions with their own origins. Returned includes retain the producer's
+  declaring-file directory and include chain.
+- Expression results do not undergo implicit source conversions. Returned
+  strings and tuples remain data. All contributions at the root of a composition
+  must produce plain dictionaries.
 
 ## Expressions and references
 
 `final` reads all definitions; `previous` reads definitions strictly before the
 expression's originating layer. Earlier definitions retain their own origins:
 their `final` references still see the complete configuration.
+The view includes preceding local contributions for nested compositions, while
+other paths still reflect the enclosing layer's earlier config. Intermediate
+views do not synthesize values for missing sequence slots; materializing those
+slots raises `MissingValueError`.
 
 Both roots accept an optional parent count. `final` equals `final(None)` and
 starts at the root. `final(0)` starts at the expression's output location;
@@ -101,13 +118,18 @@ recover its original formulas. Formatting and snapshot helpers remain available.
   present, including when newly introduced. The same applies to `expr:delete`
   and computed deletions.
 - Values use Python literal parsing with unquoted-string fallback. `expr:`
-  evaluates Python with `final`, `previous`, `value`, `computed`, `replace`,
-  `delete`, `math`, and ordinary builtins. It is trusted Python, like config files.
-- An argument starting with `expr:` contributes a whole layer, which must be a
-  plain dictionary or an expression producing one. It uses ordinary dictionary
-  merging and can contain arbitrary keys.
-- Each override is a separate layer; `value` and `previous` use the same origins
-  as definitions in config files.
+  evaluates Python with `final`, `previous`, `value`, `computed`, `include`,
+  `compose`, `replace`, `delete`, `math`, and ordinary builtins. It is trusted
+  Python, like config files.
+- `model=include:foo.py` contributes `{'model': replace(include('foo.py'))}`.
+  Override paths to files resolve relative to the working directory; nested
+  includes inside those files resolve relative to their declaring file.
+- An argument starting with `expr:` contributes a dictionary or an explicit cfgx
+  declaration producing dictionary contributions. It uses ordinary composition
+  and can contain arbitrary keys. Explicit compositions can introduce multiple
+  layers. A raw string or tuple result is not implicitly expanded.
+- Assignment and deletion overrides each contribute a layer; `value` and
+  `previous` use the same origins as definitions in config files.
 - Shorthand paths select string dictionary keys using dots or quoted subscripts.
   Non-string subscripts, including sequence indices, are rejected. Whole-layer
   expressions support non-string keys; sequence transformations use `value.map`.

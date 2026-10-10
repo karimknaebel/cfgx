@@ -52,6 +52,12 @@ Dictionaries merge recursively, including computed dictionaries. Lists and tuple
 replace earlier sequences. Use `replace(x)` to replace a dictionary and `delete`
 to remove a dictionary entry.
 
+Use `include("model.py")` to contribute a file at a nested location, and
+`compose("defaults.py", {...})` for ordered contributions there. Root source
+strings and tuples are shorthand for these operations; strings and tuples in
+config values remain data. The [mental model](docs/model.md) explains these
+contexts and how nested layers read inherited values.
+
 - `final.lr` reads the complete config, including later files and overrides.
 - `value` reads the inherited value at the current location.
 - `previous.lr` reads earlier definitions at another path.

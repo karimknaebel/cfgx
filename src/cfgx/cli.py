@@ -34,7 +34,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         action="extend",
         default=[],
         metavar="OVERRIDE",
-        help="Contribute config layers with path=value, path!=, or expr:layer.",
+        help="Contribute config layers with path=value, path=include:file, path!=, or expr:layer.",
     )
 
 

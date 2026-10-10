@@ -213,6 +213,51 @@ def test_invalid_computed_whole_layer_value():
         load(overrides=["expr:computed(lambda get: [])"])
 
 
+@pytest.mark.parametrize(
+    "override",
+    ["model=include:model.py", "model=expr:include('model.py')"],
+)
+def test_include_override_replaces_and_uses_working_directory(
+    tmp_path, monkeypatch, override
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "defaults.py").write_text("config = {'width': 3}")
+    (tmp_path / "model.py").write_text(
+        "from cfgx import final, value\n"
+        "config = 'defaults.py', {'width': value * 2, 'derived': final.model.width * 2}"
+    )
+    assert load({"model": {"old": 1}}, overrides=[override, "model.width=10"]) == {
+        "model": {"width": 10, "derived": 20}
+    }
+
+
+def test_whole_layer_include_and_compose_overrides_merge(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "model.py").write_text("config = {'width': 3}")
+    assert load(
+        {"model": {"old": 1}, "count": 2},
+        overrides=[
+            "expr:{'model': include('model.py')}",
+            "expr:compose({'count': value * 2}, {'count': value + 1})",
+        ],
+    ) == {"model": {"old": 1, "width": 3}, "count": 5}
+    assert load(overrides=["expr:include('model.py')"]) == {"width": 3}
+    assert load({"old": 1}, overrides=["expr:replace({'new': 2})"]) == {"new": 2}
+
+
+def test_compose_assignment_replaces_target_but_reads_previous():
+    assert load(
+        {"model": {"old": 1, "width": 3}},
+        overrides=["model=expr:compose({'width': value * 2}, {'width': value + 1})"],
+    ) == {"model": {"width": 7}}
+
+
+def test_include_prefix_can_be_quoted_as_string_data():
+    assert load(overrides=["path='include:missing.py'"]) == {
+        "path": "include:missing.py"
+    }
+
+
 def test_list_transform_with_map():
     assert load({"tags": ["a"]}, overrides=["tags=expr:value.map('x + [\"b\"]')"]) == {
         "tags": ["a", "b"],

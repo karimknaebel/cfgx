@@ -76,3 +76,16 @@ def test_render_raw(capsys, tmp_path):
     out = capsys.readouterr().out
     assert exit_code == 0
     assert out == f"{format_config(load(cfg_path), format='raw')}\n"
+
+
+def test_render_include_override(capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "base.py").write_text("config = {'model': {'old': 1}}\n")
+    (tmp_path / "model.py").write_text(
+        "from cfgx import final\nconfig = {'width': 3, 'derived': final(1).width * 2}\n"
+    )
+    assert (
+        main(["render", "base.py", "-o", "model=include:model.py", "model.width=4"])
+        == 0
+    )
+    assert capsys.readouterr().out == "{'model': {'width': 4, 'derived': 8}}\n"

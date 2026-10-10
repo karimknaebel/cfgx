@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import operator
+import os
 from dataclasses import dataclass
 
 
@@ -24,6 +25,34 @@ class _Replacement:
 def replace(x, /):
     """Replace inherited contents at this location instead of merging dictionaries."""
     return _Replacement(x)
+
+
+@dataclass(frozen=True)
+class _Composition:
+    sources: tuple
+
+
+def compose(*sources):
+    """Contribute ordered, dictionary-valued sources at this location.
+
+    Source strings and paths include files; source tuples group contributions.
+    Strings and tuples inside config values remain ordinary data.
+    """
+    return _Composition(sources)
+
+
+@dataclass(frozen=True)
+class _Include:
+    path: str
+
+
+def include(path, /):
+    """Include a file's unresolved config definitions at this location.
+
+    Paths are relative to the declaring config file, or the working directory
+    for sources and overrides supplied directly to ``load``.
+    """
+    return _Include(os.fspath(path))
 
 
 class Expression:
@@ -169,6 +198,8 @@ def namespace():
         "previous": previous,
         "value": value,
         "computed": computed,
+        "compose": compose,
+        "include": include,
         "replace": replace,
         "delete": delete,
         "math": math,

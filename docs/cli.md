@@ -29,6 +29,8 @@ cfg = load("base.py", overrides=["steps=48000", "lr=expr:value * 0.1"])
 | `options['literal.key']=True` | Select a literal key containing a dot |
 | `lr=expr:value * 0.1` | Transform the target's inherited value |
 | `backbone_lr=expr:final.lr * 0.1` | Contribute a final-value expression |
+| `model=include:model.py` | Replace the target with a file's unresolved config |
+| `model=expr:compose("model.py", {"width": 768})` | Replace the target with composed sources |
 
 Each override is a separate ordered layer. Assignment replaces only its target,
 while its dictionary ancestors merge normally. `foo.bar=baz` is shorthand for
@@ -51,7 +53,8 @@ assert load(
 
 Values use Python literal parsing, with an unquoted-string fallback. `expr:`
 evaluates a Python expression with `final`, `previous`, `value`, `computed`,
-`replace`, `delete`, `math`, and ordinary builtins. `x=expr:delete` also deletes.
+`include`, `compose`, `replace`, `delete`, `math`, and ordinary builtins.
+`x=expr:delete` also deletes.
 Quote overrides at the shell when they contain spaces or shell operators.
 
 ```sh
@@ -62,11 +65,30 @@ There are no separate append/remove operators. Express sequence transformations
 with `value.map(...)`, using `x` in string maps. Assigning a literal dictionary
 replaces it; an expression can explicitly combine it with `value` if needed.
 
+## Include a file at a target
+
+`include:` interprets the remaining text as a file path, relative to the working
+directory. These two overrides are equivalent:
+
+```sh
+cfgx render base.py -o 'model=include:model.py'
+cfgx render base.py -o 'model=expr:include("model.py")'
+```
+
+Both contribute `{"model": replace(include("model.py"))}`. The include keeps
+expressions unresolved so later overrides still affect their dependencies. Its
+own relative includes use `model.py`'s directory. Assignment replaces inherited
+contents at `model`; the whole-layer form below can merge instead.
+
+To keep an `include:` prefix as string data, quote the Python literal inside the
+shell argument: `-o "path='include:model.py'"`. `model=model.py` is also a plain
+string assignment; a filename at a value position is never included implicitly.
+
 ## Whole-layer expressions
 
 An override starting with `expr:` contributes a complete layer. It must produce
-a plain dictionary or a cfgx expression that produces a plain dictionary, just
-like a single contribution in a config file:
+a plain dictionary or an explicit cfgx declaration producing dictionary
+contributions, including `computed`, `include`, `compose`, and `replace`:
 
 ```sh
 cfgx render base.py -o \
@@ -76,8 +98,16 @@ cfgx render base.py -o \
 Whole-layer expressions follow ordinary composition rules, including dictionary
 merging. Use `replace` explicitly when a dictionary should be replaced. They
 support arbitrary dictionary keys and can be mixed with assignment and deletion
-shorthand. Each argument contributes one layer; definitions within the same layer
-share the same `previous` view.
+shorthand. Definitions within a layer share the same `previous` view. An explicit
+composition can contribute multiple ordered layers:
+
+```sh
+cfgx render base.py -o 'expr:{"model": include("model.py")}'
+cfgx render base.py -o 'expr:compose({"steps": value * 2}, {"steps": value + 1})'
+```
+
+There is no separate `compose:` prefix. Expressions returning strings or tuples
+do not implicitly include or compose sources; use the explicit declarations.
 
 ## Path rules
 

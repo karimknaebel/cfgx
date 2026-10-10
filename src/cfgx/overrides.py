@@ -3,7 +3,16 @@
 import ast
 import re
 
-from .expressions import Expression, delete, namespace, replace
+from .expressions import (
+    Expression,
+    _Composition,
+    _Include,
+    _Replacement,
+    delete,
+    include,
+    namespace,
+    replace,
+)
 
 
 def parse_path(text):
@@ -60,9 +69,11 @@ def parse_path(text):
 def parse_override(text):
     if text.startswith("expr:"):
         layer = _parse_value(text)
-        if type(layer) is not dict and not isinstance(layer, Expression):
+        if type(layer) is not dict and not isinstance(
+            layer, (Expression, _Composition, _Include, _Replacement)
+        ):
             raise TypeError(
-                "A whole-layer expression must produce a plain dict or cfgx expression"
+                "A whole-layer expression must produce a plain dict or cfgx declaration"
             )
         return layer
     quote = None
@@ -102,6 +113,8 @@ def parse_override(text):
 
 
 def _parse_value(text):
+    if text.startswith("include:"):
+        return include(text[8:])
     if text.startswith("expr:"):
         return eval(compile(text[5:], "<cfgx override>", "eval"), namespace())
     try:
